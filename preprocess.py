@@ -25,9 +25,11 @@ if __name__ == '__main__':
 
     logger = create_logger(None, 0)
 
-    voc_path = sys.argv[1]
-    txt_path = sys.argv[2]
-    bin_path = sys.argv[2] + '.pth'
+    # voc_path = sys.argv[1]
+    # txt_path = sys.argv[2]
+    voc_path = './data/vocab'
+    txt_path = './data/Sars_antigen.txt'
+    bin_path = txt_path + '.pth'
     assert os.path.isfile(voc_path)
     assert os.path.isfile(txt_path)
 

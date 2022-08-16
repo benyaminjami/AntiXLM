@@ -28,11 +28,11 @@ def get_parser():
     # main parameters
     parser.add_argument("--dump_path", type=str, default="./dumped/",
                         help="Experiment dump path")
-    parser.add_argument("--exp_name", type=str, default="",
+    parser.add_argument("--exp_name", type=str, default="test",
                         help="Experiment name")
     parser.add_argument("--save_periodic", type=int, default=0,
                         help="Save the model periodically (0 to disable)")
-    parser.add_argument("--exp_id", type=str, default="",
+    parser.add_argument("--exp_id", type=str, default="0",
                         help="Experiment ID")
 
     # float16 / AMP API
@@ -42,7 +42,7 @@ def get_parser():
                         help="Use AMP wrapper for float16 / distributed / gradient accumulation. Level of optimization. -1 to disable.")
 
     # only use an encoder (use a specific decoder for machine translation)
-    parser.add_argument("--encoder_only", type=bool_flag, default=True,
+    parser.add_argument("--encoder_only", type=bool_flag, default=False,
                         help="Only use an encoder")
 
     # model parameters
@@ -52,11 +52,11 @@ def get_parser():
                         help="Number of Transformer layers")
     parser.add_argument("--n_heads", type=int, default=8,
                         help="Number of Transformer heads")
-    parser.add_argument("--dropout", type=float, default=0,
+    parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout")
-    parser.add_argument("--attention_dropout", type=float, default=0,
+    parser.add_argument("--attention_dropout", type=float, default=0.1,
                         help="Dropout in the attention layer")
-    parser.add_argument("--gelu_activation", type=bool_flag, default=False,
+    parser.add_argument("--gelu_activation", type=bool_flag, default=True,
                         help="Use a GELU activation instead of ReLU")
     parser.add_argument("--share_inout_emb", type=bool_flag, default=True,
                         help="Share input and output embeddings")
@@ -97,17 +97,17 @@ def get_parser():
                         help="Fraction of words to mask out / keep / randomize, among the words to predict")
 
     # input sentence noise
-    parser.add_argument("--word_shuffle", type=float, default=0,
+    parser.add_argument("--word_shuffle", type=float, default=3,
                         help="Randomly shuffle input words (0 to disable)")
-    parser.add_argument("--word_dropout", type=float, default=0,
+    parser.add_argument("--word_dropout", type=float, default=0.1,
                         help="Randomly dropout input words (0 to disable)")
-    parser.add_argument("--word_blank", type=float, default=0,
+    parser.add_argument("--word_blank", type=float, default=0.1,
                         help="Randomly blank input words (0 to disable)")
 
     # data
-    parser.add_argument("--data_path", type=str, default="",
+    parser.add_argument("--data_path", type=str, default="./data",
                         help="Data path")
-    parser.add_argument("--lgs", type=str, default="",
+    parser.add_argument("--lgs", type=str, default="at-ag",
                         help="Languages (lg1-lg2-lg3 .. ex: en-fr-es-de)")
     parser.add_argument("--max_vocab", type=int, default=-1,
                         help="Maximum vocabulary size (-1 to disable)")
@@ -155,7 +155,7 @@ def get_parser():
                         help="Causal coefficient (LM)")
     parser.add_argument("--lambda_pc", type=str, default="1",
                         help="PC coefficient")
-    parser.add_argument("--lambda_ae", type=str, default="1",
+    parser.add_argument("--lambda_ae", type=str, default="0:1,100000:0.1,300000:0",
                         help="AE coefficient")
     parser.add_argument("--lambda_mt", type=str, default="1",
                         help="MT coefficient")
@@ -169,9 +169,9 @@ def get_parser():
                         help="Masked prediction steps (MLM / TLM)")
     parser.add_argument("--mt_steps", type=str, default="",
                         help="Machine translation steps")
-    parser.add_argument("--ae_steps", type=str, default="",
+    parser.add_argument("--ae_steps", type=str, default="at,ag",
                         help="Denoising auto-encoder steps")
-    parser.add_argument("--bt_steps", type=str, default="",
+    parser.add_argument("--bt_steps", type=str, default="at-ag-at,ag-at-ag",
                         help="Back-translation steps")
     parser.add_argument("--pc_steps", type=str, default="",
                         help="Parallel classification steps")
@@ -218,6 +218,7 @@ def get_parser():
 def main(params):
 
     # initialize the multi-GPU / multi-node training
+    # TODO
     init_distributed_mode(params)
 
     # initialize the experiment
@@ -288,17 +289,20 @@ def main(params):
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
 
             trainer.iter()
+            # TODO
+            break
 
         logger.info("============ End of epoch %i ============" % trainer.epoch)
 
         # evaluate perplexity
-        scores = evaluator.run_all_evals(trainer)
+        # TODO
+        # scores = evaluator.run_all_evals(trainer)
 
         # print / JSON log
-        for k, v in scores.items():
-            logger.info("%s -> %.6f" % (k, v))
-        if params.is_master:
-            logger.info("__log__:%s" % json.dumps(scores))
+        # for k, v in scores.items():
+        #     logger.info("%s -> %.6f" % (k, v))
+        # if params.is_master:
+        #     logger.info("__log__:%s" % json.dumps(scores))
 
         # end of epoch
         trainer.save_best_model(scores)

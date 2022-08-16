@@ -167,11 +167,11 @@ class Dictionary(object):
         """
         Index sentences with a dictionary.
         """
-        if bin_path is not None and os.path.isfile(bin_path):
-            print("Loading data from %s ..." % bin_path)
-            data = torch.load(bin_path)
-            assert dico == data['dico']
-            return data
+        # if bin_path is not None and os.path.isfile(bin_path):
+        #     print("Loading data from %s ..." % bin_path)
+        #     data = torch.load(bin_path)
+        #     assert dico == data['dico']
+        #     return data
 
         positions = []
         sentences = []
@@ -182,7 +182,7 @@ class Dictionary(object):
         for i, line in enumerate(f):
             if i % 1000000 == 0 and i > 0:
                 print(i)
-            s = line.rstrip().split()
+            s = list(line.rstrip())
             # skip empty sentences
             if len(s) == 0:
                 print("Empty sentence in line %i." % i)

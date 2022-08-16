@@ -10,12 +10,12 @@ import math
 import time
 from logging import getLogger
 from collections import OrderedDict
-import numpy as np
-import torch
+import numpy as np 
+import torch       
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
-import apex
+# import apex
 
 from .optim import get_optimizer
 from .utils import to_cuda, concat_batches, find_modules
@@ -845,7 +845,8 @@ class EncDecTrainer(Trainer):
         assert len(y) == (len2 - 1).sum().item()
 
         # cuda
-        x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+        # TODO
+        # x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
         # encode source sentence
         enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
@@ -887,7 +888,8 @@ class EncDecTrainer(Trainer):
         langs1 = x1.clone().fill_(lang1_id)
 
         # cuda
-        x1, len1, langs1 = to_cuda(x1, len1, langs1)
+        # TODO
+        # x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
         with torch.no_grad():
