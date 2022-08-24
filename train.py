@@ -279,7 +279,6 @@ def main(params):
             # denoising auto-encoder steps
             for lang in shuf_order(params.ae_steps):
                 trainer.mt_step(lang, lang, params.lambda_ae)
-                logger.info("AE done " + str(lang))
 
             # machine translation steps
             for lang1, lang2 in shuf_order(params.mt_steps, params):
@@ -288,7 +287,6 @@ def main(params):
             # back-translation steps
             for lang1, lang2, lang3 in shuf_order(params.bt_steps):
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
-                logger.info("BT done " + str(lang1) + str(lang2) + str(lang3))
 
             trainer.iter()
             
