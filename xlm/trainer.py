@@ -845,7 +845,7 @@ class EncDecTrainer(Trainer):
         assert len(y) == (len2 - 1).sum().item()
 
         # cuda
-        # TODO
+        # TODO: GPU
         x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
         # encode source sentence
@@ -888,7 +888,7 @@ class EncDecTrainer(Trainer):
         langs1 = x1.clone().fill_(lang1_id)
 
         # cuda
-        # TODO
+        # TODO: GPU
         x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
@@ -901,7 +901,7 @@ class EncDecTrainer(Trainer):
             # encode source sentence and translate it
             enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
             enc1 = enc1.transpose(0, 1)
-            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=int(1.3 * len1.max().item() + 5))
+            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=int(1.6 * len1.max().item() + 5))
             langs2 = x2.clone().fill_(lang2_id)
 
             # free CUDA memory

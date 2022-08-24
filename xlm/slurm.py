@@ -151,7 +151,7 @@ def init_distributed_mode(params):
     print(PREFIX + "Hostname       : %s" % socket.gethostname())
 
     # set GPU device
-    # TODO
+    # TODO: GPU
     torch.cuda.set_device(params.local_rank)
 
     # initialize multi-GPU
