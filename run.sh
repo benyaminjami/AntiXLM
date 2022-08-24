@@ -1,7 +1,7 @@
 python train.py \
 --exp_name unsupMT_agab \
 --dump_path ./dumped/ \
---data_path ~/data/processed/ \
+--data_path ../data/ \
 --lgs 'ab-ag' \
 --ae_steps 'ab,ag' \
 --bt_steps 'ab-ag-ab,ag-ab-ag' \

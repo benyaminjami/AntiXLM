@@ -218,7 +218,7 @@ def get_parser():
 def main(params):
 
     # initialize the multi-GPU / multi-node training
-    # TODO
+    # TODO: GPU
     init_distributed_mode(params)
 
     # initialize the experiment
@@ -279,6 +279,7 @@ def main(params):
             # denoising auto-encoder steps
             for lang in shuf_order(params.ae_steps):
                 trainer.mt_step(lang, lang, params.lambda_ae)
+                logger.info("AE done " + str(lang))
 
             # machine translation steps
             for lang1, lang2 in shuf_order(params.mt_steps, params):
@@ -287,15 +288,15 @@ def main(params):
             # back-translation steps
             for lang1, lang2, lang3 in shuf_order(params.bt_steps):
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
+                logger.info("BT done " + str(lang1) + str(lang2) + str(lang3))
 
             trainer.iter()
-            # TODO
-            # break
+            
 
         logger.info("============ End of epoch %i ============" % trainer.epoch)
 
         # evaluate perplexity
-        # TODO
+        
         scores = evaluator.run_all_evals(trainer)
 
         # print / JSON log
