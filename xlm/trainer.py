@@ -892,6 +892,7 @@ class EncDecTrainer(Trainer):
         x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
+        
         with torch.no_grad():
 
             # evaluation mode
@@ -910,7 +911,7 @@ class EncDecTrainer(Trainer):
             # training mode
             self.encoder.train()
             self.decoder.train()
-
+        logger.info("generated")
         # encode generate sentence
         enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False)
         enc2 = enc2.transpose(0, 1)

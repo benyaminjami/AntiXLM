@@ -9,7 +9,7 @@ python train.py \
 --word_dropout 0.1 \
 --word_blank 0.1 \
 --lambda_ae '0:1,100000:0.1,300000:0' \
---max_len 512 \
+--max_len 250 \
 --encoder_only false \
 --emb_dim 256 \
 --n_layers 4 \
