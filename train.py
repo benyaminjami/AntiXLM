@@ -290,19 +290,19 @@ def main(params):
 
             trainer.iter()
             # TODO
-            break
+            # break
 
         logger.info("============ End of epoch %i ============" % trainer.epoch)
 
         # evaluate perplexity
         # TODO
-        # scores = evaluator.run_all_evals(trainer)
+        scores = evaluator.run_all_evals(trainer)
 
         # print / JSON log
-        # for k, v in scores.items():
-        #     logger.info("%s -> %.6f" % (k, v))
-        # if params.is_master:
-        #     logger.info("__log__:%s" % json.dumps(scores))
+        for k, v in scores.items():
+            logger.info("%s -> %.6f" % (k, v))
+        if params.is_master:
+            logger.info("__log__:%s" % json.dumps(scores))
 
         # end of epoch
         trainer.save_best_model(scores)
