@@ -892,7 +892,7 @@ class EncDecTrainer(Trainer):
         x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
-        
+        logger.info("start")
         with torch.no_grad():
 
             # evaluation mode
@@ -911,7 +911,7 @@ class EncDecTrainer(Trainer):
             # training mode
             self.encoder.train()
             self.decoder.train()
-        logger.info("generated")
+        logger.info("generated" + str(len2.max().item()))
         # encode generate sentence
         enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False)
         enc2 = enc2.transpose(0, 1)
@@ -928,7 +928,7 @@ class EncDecTrainer(Trainer):
         _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False)
         self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
         loss = lambda_coeff * loss
-
+        logger.info("finish")
         # optimize
         self.optimize(loss)
 
