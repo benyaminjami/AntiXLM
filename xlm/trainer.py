@@ -892,7 +892,6 @@ class EncDecTrainer(Trainer):
         x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
-        logger.info("start")
         with torch.no_grad():
 
             # evaluation mode
@@ -902,7 +901,13 @@ class EncDecTrainer(Trainer):
             # encode source sentence and translate it
             enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
             enc1 = enc1.transpose(0, 1)
-            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=int(1.6 * len1.max().item() + 5))
+            
+            if lang2 == 'ab':
+                ml = 160
+            if lang2 == 'ag':
+                ml = 300
+                    
+            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=ml)
             langs2 = x2.clone().fill_(lang2_id)
 
             # free CUDA memory
@@ -911,7 +916,6 @@ class EncDecTrainer(Trainer):
             # training mode
             self.encoder.train()
             self.decoder.train()
-        logger.info("generated" + str(len2.max().item()))
         # encode generate sentence
         enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False)
         enc2 = enc2.transpose(0, 1)
@@ -928,7 +932,6 @@ class EncDecTrainer(Trainer):
         _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False)
         self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
         loss = lambda_coeff * loss
-        logger.info("finish")
         # optimize
         self.optimize(loss)
 
