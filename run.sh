@@ -3,8 +3,8 @@ python train.py \
 --dump_path ./dumped/ \
 --data_path ~/data/processed/ \
 --lgs 'ab-ag' \
---ae_steps 'ab,ag’ \
---bt_steps 'ab-ag-ab,ag-ab-ag’ \
+--ae_steps 'ab,ag' \
+--bt_steps 'ab-ag-ab,ag-ab-ag' \
 --word_shuffle 3 \
 --word_dropout 0.1 \
 --word_blank 0.1 \
