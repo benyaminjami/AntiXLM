@@ -279,8 +279,10 @@ class Trainer(object):
         self.stats['processed_w'] = 0
         self.last_time = new_time
 
+        s_ns = " - N_Sentences: {}".format(self.n_sentences)
+
         # log speed + stats + learning rate
-        logger.info(s_iter + s_speed + s_stat + s_lr)
+        logger.info(s_iter + s_speed + s_stat + s_lr + s_ns)
 
     def get_iterator(self, iter_name, lang1, lang2, stream):
         """
