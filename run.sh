@@ -21,9 +21,9 @@ python train.py \
 --batch_size 32 \
 --bptt 256 \
 --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001 \
---epoch_size 200000 \
+--epoch_size 70000 \
 --eval_bleu true \
---beam_size 30 \
+--beam_size 1 \
 --stopping_criterion 'valid_ag-ab_mt_bleu,10' \
 --validation_metrics 'valid_ag-ab_mt_bleu' \
 
