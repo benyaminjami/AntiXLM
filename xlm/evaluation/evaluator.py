@@ -481,10 +481,15 @@ class EncDecEvaluator(Evaluator):
             if eval_memory:
                 for k, v in self.memory_list:
                     all_mem_att[k].append((v.last_indices, v.last_scores))
-
+            
             # generate translation - translate / convert to text
             if eval_bleu:
-                max_len = int(1.5 * len1.max().item() + 10)
+                if lang2 == 'ab':
+                    max_len = 160
+                if lang2 == 'ag':
+                    max_len = 300
+                    
+                # max_len = int(1.5 * len1.max().item() + 10)
                 if params.beam_size == 1:
                     generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=max_len)
                 else:
