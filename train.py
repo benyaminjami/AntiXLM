@@ -218,7 +218,6 @@ def get_parser():
 def main(params):
 
     # initialize the multi-GPU / multi-node training
-    # TODO: GPU
     init_distributed_mode(params)
 
     # initialize the experiment
