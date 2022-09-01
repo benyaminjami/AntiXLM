@@ -235,6 +235,9 @@ class Evaluator(object):
                 for lang1, lang2 in params.mlm_steps:
                     self.evaluate_mlm(scores, data_set, lang1, lang2)
 
+                for lang in params.ae_steps:
+                    self.evaluate_ae(data_set, lang, lang)
+
                 # machine translation task (evaluate perplexity and accuracy)
                 for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):
                     eval_bleu = params.eval_bleu and params.is_master
@@ -504,9 +507,13 @@ class EncDecEvaluator(Evaluator):
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
 
-        # compute perplexity and prediction accuracy
-        scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
-        scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
+
+        if lang1 != lang2:
+            # compute perplexity and prediction accuracy
+            scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
+            scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
+        else:
+            scores['%s-ae' % lang1] = 100. * n_valid / n_words
 
         # compute memory usage
         if eval_memory:
@@ -526,10 +533,11 @@ class EncDecEvaluator(Evaluator):
                 f.write('\n'.join(hypothesis) + '\n')
             restore_segmentation(hyp_path)
 
-            # evaluate BLEU score
-            bleu = eval_moses_bleu(ref_path, hyp_path)
-            logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
-            scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
+            if lang1 != lang2:
+                # evaluate BLEU score
+                bleu = eval_moses_bleu(ref_path, hyp_path)
+                logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
+                scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
 
 
 def convert_to_text(batch, lengths, dico, params):

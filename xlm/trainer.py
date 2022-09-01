@@ -253,7 +253,8 @@ class Trainer(object):
         """
         Print statistics about the training.
         """
-        if self.n_total_iter == 1:
+        
+        if self.n_total_iter % 5 != 0:
             return
 
         for k, v in self.stats.items():
@@ -261,11 +262,8 @@ class Trainer(object):
                 if len(v) > 0:
                     utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
             else:
-                utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)
-
-        if self.n_total_iter % 5 != 0:
-            return
-
+                utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)  
+        
         s_iter = "%7i - " % self.n_total_iter
         s_stat = ' || '.join([
             '{}: {:7.4f}'.format(k, np.mean(v)) for k, v in self.stats.items()
