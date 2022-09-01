@@ -254,8 +254,11 @@ class Trainer(object):
         Print statistics about the training.
         """
 
-        for k in self.stats.keys():
-            utils.board_writer.add_scalar(str(k), float(self.stats[k][-1]), self.n_total_iter)
+        for k, v in self.stats.items():
+            if type(v) is list:
+                utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
+            else:
+                utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)
 
         if self.n_total_iter % 5 != 0:
             return
