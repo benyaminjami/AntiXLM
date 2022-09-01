@@ -414,6 +414,7 @@ class EncDecEvaluator(Evaluator):
         super().__init__(trainer, data, params)
         self.encoder = trainer.encoder
         self.decoder = trainer.decoder
+        self.cuda = params.cuda
 
     def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
         """
@@ -462,7 +463,8 @@ class EncDecEvaluator(Evaluator):
 
             # cuda
             #TODO: GPU
-            x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+            if self.cuda:
+                x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
             # encode source sentence
             enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)

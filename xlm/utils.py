@@ -16,6 +16,7 @@ import subprocess
 import numpy as np
 import torch
 
+from tensorboardX import SummaryWriter
 from .logger import create_logger
 
 
@@ -50,6 +51,7 @@ def initialize_exp(params):
     - dump parameters
     - create a logger
     """
+    global board_writer
     # dump parameters
     get_dump_path(params)
     pickle.dump(params, open(os.path.join(params.dump_path, 'params.pkl'), 'wb'))
@@ -71,6 +73,9 @@ def initialize_exp(params):
 
     # check experiment name
     assert len(params.exp_name.strip()) > 0
+
+    #creat a tensorboard
+    board_writer = SummaryWriter(params.dump_path)
 
     # create a logger
     logger = create_logger(os.path.join(params.dump_path, 'train.log'), rank=getattr(params, 'global_rank', 0))

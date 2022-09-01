@@ -8,6 +8,7 @@
 import json
 import random
 import argparse
+import xlm.utils as utils
 
 from xlm.slurm import init_signal_handler, init_distributed_mode
 from xlm.data.loader import check_data_params, load_data
@@ -26,6 +27,8 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Language transfer")
 
     # main parameters
+    parser.add_argument("--cuda", type=bool_flag, default=False,
+                        help="Is GPU availble?")
     parser.add_argument("--dump_path", type=str, default="./dumped/",
                         help="Experiment dump path")
     parser.add_argument("--exp_name", type=str, default="test",
@@ -299,6 +302,8 @@ def main(params):
         # print / JSON log
         for k, v in scores.items():
             logger.info("%s -> %.6f" % (k, v))
+        for k in scores:
+            utils.board_writer.add_scalar(k, scores[k])
         if params.is_master:
             logger.info("__log__:%s" % json.dumps(scores))
 

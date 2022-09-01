@@ -183,5 +183,7 @@ def build_model(params, dico):
         logger.info("Number of parameters (decoder): %i" % sum([p.numel() for p in decoder.parameters() if p.requires_grad]))
 
         # TODO: GPU
-        return encoder.cuda(), decoder.cuda()
-        # return encoder, decoder
+        if params.cuda:
+            encoder, decoder = encoder.cuda(), decoder.cuda()
+        # return encoder.cuda(), decoder.cuda()
+        return encoder, decoder

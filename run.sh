@@ -1,4 +1,5 @@
 python train.py \
+--cuda True \
 --exp_name unsupMT_agab \
 --dump_path ./dumped/ \
 --data_path ../data/ \

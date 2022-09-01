@@ -11,6 +11,7 @@ import time
 from logging import getLogger
 from collections import OrderedDict
 import numpy as np 
+import xlm.utils as utils
 import torch       
 from torch import nn
 from torch.nn import functional as F
@@ -25,6 +26,7 @@ from .model.transformer import TransformerFFN
 
 
 logger = getLogger()
+
 
 
 class Trainer(object):
@@ -251,6 +253,10 @@ class Trainer(object):
         """
         Print statistics about the training.
         """
+
+        for k in self.stats.keys():
+            utils.board_writer.add_scalar(k, self.stats[k][-1])
+
         if self.n_total_iter % 5 != 0:
             return
 
@@ -848,7 +854,8 @@ class EncDecTrainer(Trainer):
 
         # cuda
         # TODO: GPU
-        x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+        if self.params.cuda:
+            x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
         # encode source sentence
         enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
@@ -891,7 +898,8 @@ class EncDecTrainer(Trainer):
 
         # cuda
         # TODO: GPU
-        x1, len1, langs1 = to_cuda(x1, len1, langs1)
+        if self.params.cuda:
+            x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
         # generate a translation
         with torch.no_grad():
