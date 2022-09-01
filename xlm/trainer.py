@@ -255,7 +255,7 @@ class Trainer(object):
         """
 
         for k in self.stats.keys():
-            utils.board_writer.add_scalar(k, self.stats[k][-1])
+            utils.board_writer.add_scalar(k, self.stats[k][-1], self.n_total_iter)
 
         if self.n_total_iter % 5 != 0:
             return
