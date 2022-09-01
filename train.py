@@ -303,7 +303,7 @@ def main(params):
         for k, v in scores.items():
             logger.info("%s -> %.6f" % (k, v))
         for k in scores:
-            utils.board_writer.add_scalar(k, scores[k], trainer.n_total_iter)
+            utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
         if params.is_master:
             logger.info("__log__:%s" % json.dumps(scores))
 
