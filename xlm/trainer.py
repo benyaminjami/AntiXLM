@@ -257,8 +257,9 @@ class Trainer(object):
             return
 
         for k, v in self.stats.items():
-            if type(v) is list and len(v) > 0:
-                utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
+            if type(v) is list:
+                if len(v) > 0:
+                    utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
             else:
                 utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)
 
