@@ -236,6 +236,7 @@ class Evaluator(object):
                     self.evaluate_mlm(scores, data_set, lang1, lang2)
 
                 for lang in params.ae_steps:
+                    eval_bleu = params.eval_bleu and params.is_master
                     self.evaluate_mt(scores, data_set, lang, lang, eval_bleu)
 
                 # machine translation task (evaluate perplexity and accuracy)
