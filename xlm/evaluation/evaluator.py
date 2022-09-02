@@ -578,17 +578,13 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
             sentences.append(" ".join(words))
     else:
         sentences = []
-        print(batch)
-        print("&"*100)
+        
         for j in range(len(lengths)):
             words = []
-            offset = 0
-            for k in range(offset, offset+lengths[j]-1):
-                words.append(dico[batch[k]])
-            print(words)
-            print("&"*100)
-            sentences.append(" ".join(words))
-            offset += k+1
+            for k in range(lengths[j]):
+                words.append(dico[batch[j + k*(length[j])]])
+            sentences.append(" ".join(words[1:]))
+        
         print("#"*100)
         print(sentences)
     return sentences
