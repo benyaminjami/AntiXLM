@@ -578,7 +578,7 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
             sentences.append(" ".join(words))
     else:
         sentences = [[] for _ in range(len(lengths))]
-        while True:
+        while step != 0:
             i = 0
             step = len(lengths)
             for j in range(len(lengths)):
@@ -587,8 +587,6 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
                 else:
                     step -= 1
             i+=1
-            if j + i*step > len(batch):
-                break
     return sentences
 
 
