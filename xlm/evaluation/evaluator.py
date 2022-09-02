@@ -518,7 +518,7 @@ class EncDecEvaluator(Evaluator):
             scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
             scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
         else:
-            scores['%s-ae' % lang1] = 100. * n_valid / n_words
+            scores['%s-%s_ae_acc' % (data_set, lang1)] = 100. * n_valid / n_words
 
         # compute memory usage
         if eval_memory:
