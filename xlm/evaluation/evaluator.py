@@ -581,7 +581,7 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
         step = len(lengths)
         i = 0
 
-        while step != 0:
+        while step > 0:
             for j in range(len(lengths)):
                 if i < lengths[j]-1:
                     sentences[j].append(dico[batch[j + i*step]])
