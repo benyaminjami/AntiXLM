@@ -578,7 +578,7 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
             sentences.append(" ".join(words))
     else:
         sentences = []
-        
+        print(lengths)
         for j in range(len(lengths)):
             words = []
             for k in range(lengths[j]):
