@@ -452,7 +452,7 @@ class EncDecEvaluator(Evaluator):
         if eval_bleu:
             hypothesis = []
 
-        for batch in self.get_iterator(data_set, lang1, params.id2lang(int(not lang1))):
+        for batch in self.get_iterator(data_set, lang1, params.id2lang(int(not lang1_id))):
 
             # generate batch
             (x1, len1), (x2, len2) = batch
