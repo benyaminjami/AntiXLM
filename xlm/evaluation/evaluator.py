@@ -451,6 +451,7 @@ class EncDecEvaluator(Evaluator):
         # store hypothesis to compute BLEU score
         if eval_bleu:
             hypothesis = []
+            forward_result = []
 
         for batch in self.get_iterator(data_set, lang1, params.id2lang[int(not lang1_id)]):
 
@@ -511,6 +512,7 @@ class EncDecEvaluator(Evaluator):
                         max_len=max_len
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
+                forward_result.extend(convert_to_text(word_scores.max(1)[1].item(), len2, self.dico, params))
 
 
         if lang1 != lang2:
@@ -527,6 +529,14 @@ class EncDecEvaluator(Evaluator):
 
         # compute BLEU
         if eval_bleu:
+
+            frw_name = 'frw{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            frw_path = os.path.join(params.hyp_path, frw_name)
+
+            # export sentences to hypothesis file / restore BPE segmentation
+            with open(frw_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(forward_result) + '\n')
+            restore_segmentation(frw_path)
 
             # hypothesis / reference paths
             hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
