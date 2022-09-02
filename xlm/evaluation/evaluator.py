@@ -588,6 +588,7 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
                 else:
                     step -= 1
             i+=1
+        sentences.append(" ".join(words))
     return sentences
 
 
