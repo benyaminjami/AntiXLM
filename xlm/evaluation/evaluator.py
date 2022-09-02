@@ -512,7 +512,7 @@ class EncDecEvaluator(Evaluator):
                         max_len=max_len
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
-                forward_result.extend(convert_to_text(word_scores.max(1)[1].item(), len2, self.dico, params))
+                forward_result.extend(convert_to_text(word_scores.max(1)[1], len2, self.dico, params))
 
 
         if lang1 != lang2:
@@ -555,26 +555,41 @@ class EncDecEvaluator(Evaluator):
                 scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
 
 
-def convert_to_text(batch, lengths, dico, params):
+def convert_to_text(batch, lengths, dico, params, mode=mt):
     """
     Convert a batch of sentences to a list of text sentences.
     """
     batch = batch.cpu().numpy()
     lengths = lengths.cpu().numpy()
 
-    slen, bs = batch.shape
-    assert lengths.max() == slen and lengths.shape[0] == bs
-    assert (batch[0] == params.eos_index).sum() == bs
-    assert (batch == params.eos_index).sum() == 2 * bs
-    sentences = []
+    if mode == 'mt':
+        slen, bs = batch.shape
+        assert lengths.max() == slen and lengths.shape[0] == bs
+        assert (batch[0] == params.eos_index).sum() == bs
+        assert (batch == params.eos_index).sum() == 2 * bs
+        sentences = []
 
-    for j in range(bs):
-        words = []
-        for k in range(1, lengths[j]):
-            if batch[k, j] == params.eos_index:
-                break
-            words.append(dico[batch[k, j]])
-        sentences.append(" ".join(words))
+        for j in range(bs):
+            words = []
+            for k in range(1, lengths[j]):
+                if batch[k, j] == params.eos_index:
+                    break
+                words.append(dico[batch[k, j]])
+            sentences.append(" ".join(words))
+    else:
+        sentences = []
+
+        for j in range(len(lengths)):
+            words = []
+            offset = 0
+            for k in range(offset, offset+lengths[j]):
+                if batch[k] == params.eos_index:
+                    break
+                if batch[k] in (params.bos_index, params.pad_index):
+                    continue
+                words.append(dico[batch[k]])
+            sentences.append(" ".join(words))
+            offset += k+1
     return sentences
 
 
