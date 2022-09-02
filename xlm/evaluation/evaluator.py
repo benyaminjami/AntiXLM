@@ -531,7 +531,6 @@ class EncDecEvaluator(Evaluator):
             # hypothesis / reference paths
             hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
             hyp_path = os.path.join(params.hyp_path, hyp_name)
-            ref_path = params.ref_paths[(lang1, lang2, data_set)]
 
             # export sentences to hypothesis file / restore BPE segmentation
             with open(hyp_path, 'w', encoding='utf-8') as f:
@@ -540,6 +539,7 @@ class EncDecEvaluator(Evaluator):
 
             if lang1 != lang2:
                 # evaluate BLEU score
+                ref_path = params.ref_paths[(lang1, lang2, data_set)]
                 bleu = eval_moses_bleu(ref_path, hyp_path)
                 logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
                 scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
