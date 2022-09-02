@@ -512,7 +512,7 @@ class EncDecEvaluator(Evaluator):
                         max_len=max_len
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
-                forward_result.extend(convert_to_text(word_scores.max(1)[1], len2, self.dico, params))
+                forward_result.extend(convert_to_text(word_scores.max(1)[1], len2, self.dico, params, 'ae'))
 
 
         if lang1 != lang2:
@@ -555,7 +555,7 @@ class EncDecEvaluator(Evaluator):
                 scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
 
 
-def convert_to_text(batch, lengths, dico, params, mode=mt):
+def convert_to_text(batch, lengths, dico, params, mode='mt'):
     """
     Convert a batch of sentences to a list of text sentences.
     """
