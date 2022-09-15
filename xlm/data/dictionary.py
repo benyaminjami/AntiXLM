@@ -168,14 +168,14 @@ class Dictionary(object):
     def load_weights(path):
         print("Loading weights")
 
-        if not os.path.isfile(path + 'weights'):
+        if not os.path.isfile(path + '.weights'):
             return None
 
         weights = []
 
         f = open(path + '.weights', 'r', encoding='utf-8')
         for i, line in enumerate(f):
-            sentence_weights = [int(w) for w in list(line)]
+            sentence_weights = [int(w) for w in list(line[:-1])]
             weights.extend(sentence_weights)
         
         return np.uint8(weights)
@@ -194,6 +194,7 @@ class Dictionary(object):
         positions = []
         sentences = []
         unk_words = {}
+        weights = Dictionary.load_weights(path)
 
         # index sentences
         f = open(path, 'r', encoding='utf-8')
@@ -224,7 +225,6 @@ class Dictionary(object):
             sentences.append(1)  # EOS index
         f.close()
 
-        weights = Dictionary.load_weights(path)
         # tensorize data
         positions = np.int64(positions)
         if len(dico) < 1 << 16:
