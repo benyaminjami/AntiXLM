@@ -91,7 +91,7 @@ class Dataset(object):
         self.lengths = self.pos[:, 1] - self.pos[:, 0]
 
         if self.weights is not None:
-            self.weights = self.weights * (params['cdr_weidht'] - 1)
+            self.weights = self.weights * (params.cdr_weidht - 1)
             self.weights = self.weights + 1
 
         # check number of sentences

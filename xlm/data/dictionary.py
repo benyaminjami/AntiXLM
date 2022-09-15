@@ -175,10 +175,11 @@ class Dictionary(object):
 
         f = open(path + '.weights', 'r', encoding='utf-8')
         for i, line in enumerate(f):
-            sentence_weights = [int(w) for w in list(line[:-1])]
+            sentence_weights = [int(w) for w in list(line.rstrip())]
             weights.extend(sentence_weights)
+            weights.append(-1)
         
-        return np.uint8(weights)
+        return np.int8(weights)
 
     @staticmethod
     def index_data(path, bin_path, dico):
