@@ -1,3 +1,4 @@
+pip install faiss-gpu
 cd ..
 git clone https://github.com/NVIDIA/apex
 cd apex
