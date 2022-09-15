@@ -200,7 +200,7 @@ class Dataset(object):
                 weights = torch.tensor(weights).transpose(0,1).reshape(-1)
                 sent = (sent[0], sent[1], weights)
             else:
-                n_tokens = sent[0].shape[0] * sent[0].shape[1] - sent[0].shape[1]
+                n_tokens = sent[1].sum() - sent[1].shape[0]
                 weights = torch.ByteTensor(n_tokens,).fill_(1)
                 sent = (sent[0], sent[1], weights)
             yield (sent, sentence_ids) if return_indices else sent

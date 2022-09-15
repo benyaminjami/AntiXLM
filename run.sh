@@ -18,7 +18,7 @@ python train.py \
 --dropout 0.1 \
 --attention_dropout 0.1 \
 --gelu_activation true \
---tokens_per_batch 2000 \
+--tokens_per_batch 5000 \
 --batch_size 32 \
 --bptt 256 \
 --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001 \
