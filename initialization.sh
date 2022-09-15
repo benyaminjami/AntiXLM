@@ -1,4 +1,5 @@
 pip install faiss-gpu
+pip install tensorboardx
 cd ..
 git clone https://github.com/NVIDIA/apex
 cd apex
