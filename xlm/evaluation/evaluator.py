@@ -419,6 +419,7 @@ class EncDecEvaluator(Evaluator):
         self.encoder = trainer.encoder
         self.decoder = trainer.decoder
         self.cuda = params.cuda
+        self.params = params
 
     def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
         """
@@ -496,20 +497,16 @@ class EncDecEvaluator(Evaluator):
             
             # generate translation - translate / convert to text
             if eval_bleu:
-                if lang2 == 'ab':
-                    max_len = 160
-                if lang2 == 'ag':
-                    max_len = 300
-                    
+                
                 # max_len = int(1.5 * len1.max().item() + 10)
                 if params.beam_size == 1:
-                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=max_len)
+                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2])
                 else:
                     generated, lengths = decoder.generate_beam(
                         enc1, len1, lang2_id, beam_size=params.beam_size,
                         length_penalty=params.length_penalty,
                         early_stopping=params.early_stopping,
-                        max_len=max_len
+                        max_len=self.params.max_len[langs2]
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
                 forward_result.extend(convert_to_text(word_scores.max(1)[1], len2, self.dico, params, 'ae'))

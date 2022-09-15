@@ -123,7 +123,7 @@ class PredLayer(nn.Module):
                 head_bias=True,  # default is False
             )
 
-    def forward(self, x, y, get_scores=False):
+    def forward(self, x, y, weights, get_scores=False):
         """
         Compute the loss, and optionally the scores.
         """
@@ -131,7 +131,8 @@ class PredLayer(nn.Module):
 
         if self.asm is False:
             scores = self.proj(x).view(-1, self.n_words)
-            loss = F.cross_entropy(scores, y, reduction='mean')
+            loss = F.cross_entropy(scores, y, reduction='none')
+            loss = torch.mean(loss * weights)
         else:
             _, loss = self.proj(x, y)
             scores = self.proj.log_prob(x) if get_scores else None
@@ -427,7 +428,7 @@ class TransformerModel(nn.Module):
 
         return tensor
 
-    def predict(self, tensor, pred_mask, y, get_scores):
+    def predict(self, tensor, pred_mask, y, get_scores, weights):
         """
         Given the last hidden state, compute word scores and/or the loss.
             `pred_mask` is a ByteTensor of shape (slen, bs), filled with 1 when
@@ -436,7 +437,7 @@ class TransformerModel(nn.Module):
             `get_scores` is a boolean specifying whether we need to return scores
         """
         masked_tensor = tensor[pred_mask.unsqueeze(-1).expand_as(tensor)].view(-1, self.dim)
-        scores, loss = self.pred_layer(masked_tensor, y, get_scores)
+        scores, loss = self.pred_layer(masked_tensor, y, get_scores, weights)
         return scores, loss
 
     def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):

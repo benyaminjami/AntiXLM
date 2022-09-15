@@ -77,7 +77,7 @@ class StreamDataset(object):
 
 class Dataset(object):
 
-    def __init__(self, sent, pos, params):
+    def __init__(self, sent, pos, weights, params):
 
         self.eos_index = params.eos_index
         self.pad_index = params.pad_index
@@ -87,11 +87,16 @@ class Dataset(object):
 
         self.sent = sent
         self.pos = pos
+        self.weights = weights
         self.lengths = self.pos[:, 1] - self.pos[:, 0]
+
+        if self.weights is not None:
+            self.weights = self.weights * (params['cdr_weidht'] - 1)
+            self.weights = self.weights + 1
 
         # check number of sentences
         assert len(self.pos) == (self.sent == self.eos_index).sum()
-
+        assert len(self.sent) == len(self.weights) if self.weights is not None else True
         # # remove empty sentences
         # self.remove_empty_sentences()
 
@@ -190,6 +195,13 @@ class Dataset(object):
             pos = self.pos[sentence_ids]
             sent = [self.sent[a:b] for a, b in pos]
             sent = self.batch_sentences(sent)
+            if self.weights is not None:
+                weights = torch.tensor(np.uint8([self.weights[a:b] for a, b in pos])).view(-1)
+                sent = (sent[0], sent[1], weights)
+            else:
+                n_tokens = sent[0].shape[0] * sent[0].shape[1] - sent[0].shape[0]*2
+                weights = torch.ByteTensor(n_tokens,).fill_(1)
+                sent = (sent[0], sent[1], weights)
             yield (sent, sentence_ids) if return_indices else sent
 
     def get_iterator(self, shuffle, group_by_size=False, n_sentences=-1, seed=None, return_indices=False):

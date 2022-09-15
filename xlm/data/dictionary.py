@@ -9,6 +9,8 @@ import os
 import numpy as np
 import torch
 from logging import getLogger
+from collections import defaultdict
+
 
 
 logger = getLogger()
@@ -163,6 +165,22 @@ class Dictionary(object):
         return dico
 
     @staticmethod
+    def load_weights(path):
+        print("Loading weights")
+
+        if not os.path.isfile(path + 'weights'):
+            return None
+
+        weights = []
+
+        f = open(path + '.weights', 'r', encoding='utf-8')
+        for i, line in enumerate(f):
+            sentence_weights = [int(w) for w in list(line)]
+            weights.extend(sentence_weights)
+        
+        return np.uint8(weights)
+
+    @staticmethod
     def index_data(path, bin_path, dico):
         """
         Index sentences with a dictionary.
@@ -206,6 +224,7 @@ class Dictionary(object):
             sentences.append(1)  # EOS index
         f.close()
 
+        weights = Dictionary.load_weights(path)
         # tensorize data
         positions = np.int64(positions)
         if len(dico) < 1 << 16:
@@ -220,9 +239,12 @@ class Dictionary(object):
             'positions': positions,
             'sentences': sentences,
             'unk_words': unk_words,
+            'weights': weights,
         }
         if bin_path is not None:
             print("Saving the data to %s ..." % bin_path)
             torch.save(data, bin_path, pickle_protocol=4)
 
         return data
+
+    

@@ -141,12 +141,12 @@ def load_mono_data(params, data):
             if lang in params.ae_steps or lang in params.bt_src_langs:
 
                 # create batched dataset
-                dataset = Dataset(mono_data['sentences'], mono_data['positions'], params)
+                dataset = Dataset(mono_data['sentences'], mono_data['positions'], mono_data.get('weights', None), params)
 
                 # remove empty and too long sentences
                 if splt == 'train':
                     dataset.remove_empty_sentences()
-                    dataset.remove_long_sentences(params.max_len)
+                    dataset.remove_long_sentences(params.max_len[lang])
 
                 # if there are several processes on the same machine, we can split the dataset
                 if splt == 'train' and params.n_gpu_per_node > 1 and params.split_data:
@@ -238,6 +238,7 @@ def check_data_params(params):
     # assert sorted(params.langs) == params.langs
     params.id2lang = {k: v for k, v in enumerate(sorted(params.langs))}
     params.lang2id = {k: v for v, k in params.id2lang.items()}
+    params.max_len = {k: int(v) for k, v in zip(params.lang2id.keys(), params.max_len.split(','))}
     params.n_langs = len(params.langs)
 
     # CLM steps

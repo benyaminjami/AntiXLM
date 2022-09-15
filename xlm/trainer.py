@@ -842,8 +842,8 @@ class EncDecTrainer(Trainer):
 
         # generate batch
         if lang1 == lang2:
-            (x1, len1) = self.get_batch('ae', lang1)
-            (x2, len2) = (x1, len1)
+            (x1, len1, w1) = self.get_batch('ae', lang1)
+            (x2, len2, w2) = (x1, len1, w1)
             (x1, len1) = self.add_noise(x1, len1)
         else:
             (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
@@ -869,7 +869,7 @@ class EncDecTrainer(Trainer):
         dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
 
         # loss
-        _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+        _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False, weights=w2)
         self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss.item())
         loss = lambda_coeff * loss
 
@@ -916,12 +916,7 @@ class EncDecTrainer(Trainer):
             enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
             enc1 = enc1.transpose(0, 1)
             
-            if lang2 == 'ab':
-                ml = 160
-            if lang2 == 'ag':
-                ml = 300
-                    
-            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=ml)
+            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2])
             langs2 = x2.clone().fill_(lang2_id)
 
             # free CUDA memory

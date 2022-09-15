@@ -90,7 +90,7 @@ def get_parser():
     # causal language modeling task parameters
     parser.add_argument("--context_size", type=int, default=0,
                         help="Context size (0 means that the first elements in sequences won't have any context)")
-
+    
     # masked language modeling task parameters
     parser.add_argument("--word_pred", type=float, default=0.15,
                         help="Fraction of words for which we need to make a prediction")
@@ -118,12 +118,14 @@ def get_parser():
                         help="Minimum vocabulary count")
     parser.add_argument("--lg_sampling_factor", type=float, default=-1,
                         help="Language sampling factor")
+    parser.add_argument("--cdr_weidht", type=int, default=2, 
+                        help="Weight that the cdr losses will be multipled with")
 
     # batch parameters
     parser.add_argument("--bptt", type=int, default=256,
                         help="Sequence length")
-    parser.add_argument("--max_len", type=int, default=100,
-                        help="Maximum length of sentences (after BPE)")
+    parser.add_argument("--max_len", type=str, default="100,100",
+                        help="Maximum length of sentences for languages(after BPE)")
     parser.add_argument("--group_by_size", type=bool_flag, default=True,
                         help="Sort sentences by size during the training")
     parser.add_argument("--batch_size", type=int, default=32,
