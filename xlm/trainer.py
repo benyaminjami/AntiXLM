@@ -877,7 +877,7 @@ class EncDecTrainer(Trainer):
         self.optimize(loss)
 
         # number of processed sentences / words
-        self.n_sentences += params.batch_size
+        self.n_sentences += x1.shape[0]
         self.stats['processed_s'] += len2.size(0)
         self.stats['processed_w'] += (len2 - 1).sum().item()
 
@@ -945,6 +945,6 @@ class EncDecTrainer(Trainer):
         self.optimize(loss)
 
         # number of processed sentences / words
-        self.n_sentences += params.batch_size
+        self.n_sentences += x1.shape[0]
         self.stats['processed_s'] += len1.size(0)
         self.stats['processed_w'] += (len1 - 1).sum().item()

@@ -19,10 +19,10 @@ python train.py \
 --attention_dropout 0.1 \
 --gelu_activation true \
 --tokens_per_batch 5000 \
---batch_size 32 \
+--batch_size 64 \
 --bptt 256 \
 --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001 \
---epoch_size 70000 \
+--epoch_size 20000 \
 --eval_bleu true \
 --beam_size 1 \
 --stopping_criterion 'valid_ag-ab_mt_bleu,10' \
