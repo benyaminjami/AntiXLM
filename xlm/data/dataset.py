@@ -196,10 +196,11 @@ class Dataset(object):
             sent = [self.sent[a:b] for a, b in pos]
             sent = self.batch_sentences(sent)
             if self.weights is not None:
-                weights = torch.tensor(np.uint8([self.weights[a:b] for a, b in pos])).view(-1)
+                weights = np.uint8([np.append(self.weights[a:b], 1) for a, b in pos])
+                weights = torch.tensor(weights).transpose(0,1).reshape(-1)
                 sent = (sent[0], sent[1], weights)
             else:
-                n_tokens = sent[0].shape[0] * sent[0].shape[1] - sent[0].shape[0]*2
+                n_tokens = sent[0].shape[0] * sent[0].shape[1] - sent[0].shape[1]
                 weights = torch.ByteTensor(n_tokens,).fill_(1)
                 sent = (sent[0], sent[1], weights)
             yield (sent, sentence_ids) if return_indices else sent

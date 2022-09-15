@@ -859,7 +859,7 @@ class EncDecTrainer(Trainer):
         # cuda
         # TODO: GPU
         if self.params.cuda:
-            x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+            x1, len1, langs1, x2, len2, langs2, y, w2 = to_cuda(x1, len1, langs1, x2, len2, langs2, y, w2)
 
         # encode source sentence
         enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
@@ -897,13 +897,13 @@ class EncDecTrainer(Trainer):
         lang2_id = params.lang2id[lang2]
 
         # generate source batch
-        x1, len1 = self.get_batch('bt', lang1)
+        x1, len1, w1 = self.get_batch('bt', lang1)
         langs1 = x1.clone().fill_(lang1_id)
 
         # cuda
         # TODO: GPU
         if self.params.cuda:
-            x1, len1, langs1 = to_cuda(x1, len1, langs1)
+            x1, len1, langs1, w1 = to_cuda(x1, len1, langs1, w1)
 
         # generate a translation
         with torch.no_grad():
@@ -938,7 +938,7 @@ class EncDecTrainer(Trainer):
         dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2)
 
         # loss
-        _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False)
+        _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False, weights=w1)
         self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
         loss = lambda_coeff * loss
         # optimize
