@@ -123,7 +123,7 @@ class PredLayer(nn.Module):
                 head_bias=True,  # default is False
             )
 
-    def forward(self, x, y, weights, get_scores=False):
+    def forward(self, x, y, weights=None, get_scores=False):
         """
         Compute the loss, and optionally the scores.
         """
@@ -132,7 +132,9 @@ class PredLayer(nn.Module):
         if self.asm is False:
             scores = self.proj(x).view(-1, self.n_words)
             loss = F.cross_entropy(scores, y, reduction='none')
-            loss = torch.mean(loss * weights)
+            if weights is not None:
+                loss = loss * weights
+            loss = torch.mean(loss)
         else:
             _, loss = self.proj(x, y)
             scores = self.proj.log_prob(x) if get_scores else None
@@ -428,7 +430,7 @@ class TransformerModel(nn.Module):
 
         return tensor
 
-    def predict(self, tensor, pred_mask, y, get_scores, weights):
+    def predict(self, tensor, pred_mask, y, get_scores, weights=None):
         """
         Given the last hidden state, compute word scores and/or the loss.
             `pred_mask` is a ByteTensor of shape (slen, bs), filled with 1 when
