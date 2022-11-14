@@ -128,13 +128,14 @@ class PredLayer(nn.Module):
         Compute the loss, and optionally the scores.
         """
         assert (y == self.pad_index).sum().item() == 0
-
+        assert (y.shape[0] == x.shape[0])
+        assert y.shape[0] == weights.shape[0]
         if self.asm is False:
             scores = self.proj(x).view(-1, self.n_words)
             loss = F.cross_entropy(scores, y, reduction='none')
             if weights is not None:
                 loss = loss * weights
-            loss = torch.mean(loss)
+            # loss = torch.mean(loss)
         else:
             _, loss = self.proj(x, y)
             scores = self.proj.log_prob(x) if get_scores else None
@@ -212,12 +213,23 @@ class MultiHeadAttention(nn.Module):
         q = q / math.sqrt(dim_per_head)                                       # (bs, n_heads, qlen, dim_per_head)
         scores = torch.matmul(q, k.transpose(2, 3))                           # (bs, n_heads, qlen, klen)
         mask = (mask == 0).view(mask_reshape).expand_as(scores)               # (bs, n_heads, qlen, klen)
-        scores.masked_fill_(mask, -float('inf'))                              # (bs, n_heads, qlen, klen)
-
-        weights = F.softmax(scores.float(), dim=-1).type_as(scores)           # (bs, n_heads, qlen, klen)
+        scores.masked_fill_(mask, -float('inf'))   
+        scores = torch.nan_to_num(scores, nan=-1e8)
+                           # (bs, n_heads, qlen, klen)
+        
+        s = scores.clone()
+        weights = F.softmax(s.float(), dim=-1).type_as(s)  
+        # if weights.isnan().any():
+        #     print(1)         # (bs, n_heads, qlen, klen)
         weights = F.dropout(weights, p=self.dropout, training=self.training)  # (bs, n_heads, qlen, klen)
+        # if weights.isnan().any():
+        #     print(1)
         context = torch.matmul(weights, v)                                    # (bs, n_heads, qlen, dim_per_head)
+        # if context.isnan().any():
+        #     print(1)
         context = unshape(context)                                            # (bs, qlen, dim)
+        # if context.isnan().any():
+        #     print(1)
 
         return self.out_lin(context)
 
@@ -345,12 +357,17 @@ class TransformerModel(nn.Module):
         # mask = x != self.pad_index
 
         # check inputs
+        lengths = lengths.squeeze()
+        if src_len is not None:
+            src_len = src_len.squeeze()
+            src_enc = src_enc.transpose(0, 1)
+            src_enc = src_enc[:,:src_len.max(),:]   # src_enc.shape = (bs, s, emb)
         slen, bs = x.size()
         assert lengths.size(0) == bs
         assert lengths.max().item() <= slen
         x = x.transpose(0, 1)  # batch size as dimension 0
         assert (src_enc is None) == (src_len is None)
-        if src_enc is not None:
+        if src_enc is not None:   
             assert self.is_decoder
             assert src_enc.size(0) == bs
 
@@ -393,12 +410,20 @@ class TransformerModel(nn.Module):
 
         # transformer layers
         for i in range(self.n_layers):
+            # if tensor.isnan().any():
+            #     print(1)
 
             # self attention
             attn = self.attentions[i](tensor, attn_mask, cache=cache)
+            # if attn.isnan().any():
+            #     print(1)
             attn = F.dropout(attn, p=self.dropout, training=self.training)
+            # if attn.isnan().any():
+            #     print(1)
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
+            # if tensor.isnan().any():
+            #     print(1)
 
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
@@ -406,6 +431,8 @@ class TransformerModel(nn.Module):
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
+            # if tensor.isnan().any():
+            #     print(1)
 
             # FFN
             if ('%i_in' % i) in self.memories:
@@ -413,13 +440,19 @@ class TransformerModel(nn.Module):
             else:
                 tensor = tensor + self.ffns[i](tensor)
             tensor = self.layer_norm2[i](tensor)
+            # if tensor.isnan().any():
+            #     print(1)
 
             # memory
             if ('%i_after' % i) in self.memories:
                 tensor = tensor + self.memories['%i_after' % i](tensor)
             # TODO: add extra layer norm here?
+            # if tensor.isnan().any():
+            #     print(1)
 
             tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+            # if tensor.isnan().any():
+            #     print(1)
 
         # update cache length
         if cache is not None:
@@ -427,10 +460,9 @@ class TransformerModel(nn.Module):
 
         # move back sequence length to dimension 0
         tensor = tensor.transpose(0, 1)
-
         return tensor
 
-    def predict(self, tensor, pred_mask, y, get_scores, weights=None):
+    def predict(self, tensor, y, get_scores, weights=None):
         """
         Given the last hidden state, compute word scores and/or the loss.
             `pred_mask` is a ByteTensor of shape (slen, bs), filled with 1 when
@@ -438,8 +470,9 @@ class TransformerModel(nn.Module):
             `y` is a LongTensor of shape (pred_mask.sum(),)
             `get_scores` is a boolean specifying whether we need to return scores
         """
-        masked_tensor = tensor[pred_mask.unsqueeze(-1).expand_as(tensor)].view(-1, self.dim)
-        scores, loss = self.pred_layer(masked_tensor, y, weights, get_scores)
+        y = y.squeeze()
+        weights = weights.squeeze()
+        scores, loss = self.pred_layer(tensor.transpose(0, 1), y, weights, get_scores)
         return scores, loss
 
     def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):
@@ -461,6 +494,9 @@ class TransformerModel(nn.Module):
         """
 
         # input batch
+        src_len = src_len.squeeze()
+        src_enc = src_enc.transpose(0, 1)
+        src_enc = src_enc[:,:src_len.max(),:]
         bs = len(src_len)
         assert src_enc.size(0) == bs
 
@@ -495,7 +531,7 @@ class TransformerModel(nn.Module):
                 positions=positions[:cur_len],
                 langs=langs[:cur_len],
                 causal=True,
-                src_enc=src_enc,
+                src_enc=src_enc.transpose(0, 1),
                 src_len=src_len,
                 cache=cache
             )

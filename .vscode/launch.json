@@ -4,6 +4,9 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+    
+        
+
 
         {
             "name": "Python: train.py",
@@ -13,11 +16,11 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "--cuda", "False",
+                "--cuda", "True",
                 "--debug_train", "True",
                 "--exp_name", "unsupMT_agab",
                 "--dump_path", "./dumped/",
-                "--data_path", "./data/",
+                "--data_path", "../data/",
                 "--lgs", "ab-ag",
                 "--ae_steps", "ab,ag",
                 "--bt_steps", "ab-ag-ab,ag-ab-ag",

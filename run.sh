@@ -1,4 +1,4 @@
-python train.py \
+python3 train.py \
 --cuda True \
 --exp_name unsupMT_agab \
 --dump_path ./dumped/ \
@@ -13,13 +13,13 @@ python train.py \
 --max_len 160,250 \
 --encoder_only false \
 --emb_dim 256 \
---n_layers 4 \
+--n_layers 6 \
 --n_heads 8 \
 --dropout 0.1 \
 --attention_dropout 0.1 \
 --gelu_activation true \
---tokens_per_batch 5000 \
---batch_size 64 \
+--tokens_per_batch 200000 \
+--batch_size 128 \
 --bptt 256 \
 --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001 \
 --epoch_size 20000 \

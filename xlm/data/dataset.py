@@ -84,6 +84,7 @@ class Dataset(object):
         self.batch_size = params.batch_size
         self.tokens_per_batch = params.tokens_per_batch
         self.max_batch_size = params.max_batch_size
+        self.cuda = params.cuda
 
         self.sent = sent
         self.pos = pos
@@ -233,7 +234,12 @@ class Dataset(object):
         if self.tokens_per_batch == -1:
             batches = np.array_split(indices, math.ceil(len(indices) * 1. / self.batch_size))
         else:
-            batch_ids = np.cumsum(lengths[indices]) // self.tokens_per_batch
+            if self.cuda and torch.cuda.device_count() > 1:
+                n_gpus = torch.cuda.device_count() * 2
+                temp = np.convolve(np.cumsum(lengths[indices]) ,np.ones(n_gpus,dtype=int),'valid')[::n_gpus]
+                batch_ids = np.repeat(temp, n_gpus) // self.tokens_per_batch
+            else:
+                batch_ids = np.cumsum(lengths[indices]) // self.tokens_per_batch
             _, bounds = np.unique(batch_ids, return_index=True)
             batches = [indices[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1)]
             if bounds[-1] < len(indices):

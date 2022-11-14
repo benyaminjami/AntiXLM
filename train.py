@@ -6,9 +6,11 @@
 #
 
 import json
+import torch
 import random
 import argparse
 import xlm.utils as utils
+import torch.multiprocessing as mp
 
 from xlm.slurm import init_signal_handler, init_distributed_mode
 from xlm.data.loader import check_data_params, load_data
@@ -220,7 +222,7 @@ def get_parser():
     return parser
 
 
-def main(params):
+def main(rank, world_size, params):
 
     # initialize the multi-GPU / multi-node training
     init_distributed_mode(params)
@@ -240,6 +242,7 @@ def main(params):
     else:
         encoder, decoder = build_model(params, data['dico'])
 
+
     # build trainer, reload potential checkpoints / build evaluator
     if params.encoder_only:
         trainer = SingleTrainer(model, data, params)
@@ -258,7 +261,8 @@ def main(params):
 
     # set sampling probabilities for training
     set_sampling_probs(data, params)
-
+    if torch.cuda.device_count() > 1:
+        params.multi_gpu = True
     # language model training
     for _ in range(params.max_epoch):
 
@@ -333,4 +337,10 @@ if __name__ == '__main__':
     check_model_params(params)
 
     # run experiment
-    main(params)
+    world_size = 4    
+    mp.spawn(
+        main,
+        args=(world_size, params),
+        nprocs=world_size
+    )
+    # main(params)

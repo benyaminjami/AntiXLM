@@ -128,7 +128,12 @@ def to_cuda(*args):
     """
     Move tensors to CUDA.
     """
-    return [None if x is None else x.cuda() for x in args]
+    def add_dim(x):
+        if x.dim() < 2:
+            x = x.unsqueeze(0)
+        return x
+
+    return [None if x is None else add_dim(x).cuda() for x in args]
 
 
 def restore_segmentation(path):

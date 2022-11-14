@@ -165,6 +165,9 @@ def init_distributed_mode(params):
         # WORLD_SIZE - required; can be set either here, or in a call to init function
         # RANK - required; can be set either here, or in a call to init function
 
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12355'
+        
         print("Initializing PyTorch distributed ...")
         torch.distributed.init_process_group(
             init_method='env://',

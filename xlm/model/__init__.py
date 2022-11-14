@@ -182,6 +182,11 @@ def build_model(params, dico):
         logger.info("Number of parameters (encoder): %i" % sum([p.numel() for p in encoder.parameters() if p.requires_grad]))
         logger.info("Number of parameters (decoder): %i" % sum([p.numel() for p in decoder.parameters() if p.requires_grad]))
 
+        if params.cuda and torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
+            # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+            
+            encoder, decoder = torch.nn.DataParallel(encoder, dim=1), torch.nn.DataParallel(decoder, dim=1)
         # TODO: GPU
         if params.cuda:
             encoder, decoder = encoder.cuda(), decoder.cuda()
