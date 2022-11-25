@@ -23,6 +23,8 @@ lib64/
 parts/
 sdist/
 var/
+AntiXLM/
+wandb/
 wheels/
 share/python-wheels/
 *.egg-info/

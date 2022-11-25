@@ -6,6 +6,7 @@
 #
 
 from logging import getLogger
+from subprocess import call
 import os
 import sys
 import torch
@@ -23,7 +24,7 @@ def sig_handler(signum, frame):
     logger.warning("Host: %s - Global rank: %i" % (socket.gethostname(), prod_id))
     if prod_id == 0:
         logger.warning("Requeuing job " + os.environ['SLURM_JOB_ID'])
-        os.system('scontrol requeue ' + os.environ['SLURM_JOB_ID'])
+        os.system('/opt/slurm/bin/scontrol requeue ' + os.environ['SLURM_JOB_ID'])
     else:
         logger.warning("Not the master process, no need to requeue.")
     sys.exit(-1)
@@ -56,6 +57,7 @@ def init_distributed_mode(params):
     params.is_slurm_job = 'SLURM_JOB_ID' in os.environ and not params.debug_slurm
     print("SLURM job: %s" % str(params.is_slurm_job))
 
+    
     # SLURM job
     if params.is_slurm_job:
 
@@ -74,7 +76,7 @@ def init_distributed_mode(params):
             print(PREFIX + "%s: %s" % (name, str(value)))
 
         # # job ID
-        # params.job_id = os.environ['SLURM_JOB_ID']
+        params.job_id = os.environ['SLURM_JOB_ID']
 
         # number of nodes / node ID
         params.n_nodes = int(os.environ['SLURM_JOB_NUM_NODES'])
@@ -89,7 +91,7 @@ def init_distributed_mode(params):
         params.n_gpu_per_node = params.world_size // params.n_nodes
 
         # define master address and master port
-        hostnames = subprocess.check_output(['scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
+        hostnames = subprocess.check_output(['/opt/slurm/bin/scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
         params.master_addr = hostnames.split()[0].decode('utf-8')
         assert 10001 <= params.master_port <= 20000 or params.world_size == 1
         print(PREFIX + "Master address: %s" % params.master_addr)
@@ -136,22 +138,26 @@ def init_distributed_mode(params):
     params.is_master = params.node_id == 0 and params.local_rank == 0
     params.multi_node = params.n_nodes > 1
     params.multi_gpu = params.world_size > 1
+    
+    os.environ["NCCL_DEBUG"] = "INFO"
 
     # summary
     PREFIX = "%i - " % params.global_rank
     print(PREFIX + "Number of nodes: %i" % params.n_nodes)
     print(PREFIX + "Node ID        : %i" % params.node_id)
     print(PREFIX + "Local rank     : %i" % params.local_rank)
+    print(PREFIX + "Local rank     : %i" % torch.cuda.current_device())
     print(PREFIX + "Global rank    : %i" % params.global_rank)
     print(PREFIX + "World size     : %i" % params.world_size)
     print(PREFIX + "GPUs per node  : %i" % params.n_gpu_per_node)
+    print(PREFIX + "GPUs per node-T: %i" % torch.cuda.device_count())
     print(PREFIX + "Master         : %s" % str(params.is_master))
     print(PREFIX + "Multi-node     : %s" % str(params.multi_node))
     print(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
     print(PREFIX + "Hostname       : %s" % socket.gethostname())
-
+    print(PREFIX + "GPU            : %s" % torch.cuda.device(torch.cuda.current_device()))
+    # params.local_rank = torch.cuda.current_device()
     # set GPU device
-    # TODO: GPU
     if params.cuda:
         torch.cuda.set_device(params.local_rank)
 
@@ -169,4 +175,7 @@ def init_distributed_mode(params):
         torch.distributed.init_process_group(
             init_method='env://',
             backend='nccl',
+            world_size=params.world_size,
+            rank=params.global_rank
         )
+        print(PREFIX + "Initilized   ")

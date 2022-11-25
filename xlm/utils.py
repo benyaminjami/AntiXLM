@@ -15,6 +15,8 @@ import argparse
 import subprocess
 import numpy as np
 import torch
+import wandb
+import datetime
 
 from tensorboardX import SummaryWriter
 from .logger import create_logger
@@ -52,6 +54,12 @@ def initialize_exp(params):
     - create a logger
     """
     global board_writer
+
+    t = datetime.datetime.now()
+    t = t.replace(second=0, microsecond=0, minute=(t.minute%12)*5)
+    wandb.init(project=params.exp_name,
+               group='DDP' + str(t))
+
     # dump parameters
     get_dump_path(params)
     pickle.dump(params, open(os.path.join(params.dump_path, 'params.pkl'), 'wb'))

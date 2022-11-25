@@ -90,8 +90,8 @@ class Dataset(object):
         self.weights = weights
         self.lengths = self.pos[:, 1] - self.pos[:, 0]
 
-        if self.weights is not None:
-            self.weights = self.weights * (params.cdr_weidht - 1)
+        if self.weights is not None and not params.skip_fw:
+            self.weights = self.weights * (params.cdr_weight - 1)
             self.weights = self.weights + 1
 
         # check number of sentences
@@ -117,7 +117,7 @@ class Dataset(object):
         assert len(self.pos) == (self.sent[self.pos[:, 1]] == eos).sum()  # check sentences indices
         # assert self.lengths.min() > 0                                     # check empty sentences
 
-    def batch_sentences(self, sentences):
+    def batch_sentences(self, sentences, w=None):
         """
         Take as input a list of n sentences (torch.LongTensor vectors) and return
         a tensor of size (slen, n) where slen is the length of the longest
@@ -126,13 +126,19 @@ class Dataset(object):
         # sentences = sorted(sentences, key=lambda x: len(x), reverse=True)
         lengths = torch.LongTensor([len(s) + 2 for s in sentences])
         sent = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(self.pad_index)
-
+        weights = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(0)
+        
         sent[0] = self.eos_index
         for i, s in enumerate(sentences):
             if lengths[i] > 2:  # if sentence not empty
                 sent[1:lengths[i] - 1, i].copy_(torch.from_numpy(s.astype(np.int64)))
+                if w is not None:
+                    weights[1:lengths[i] - 1, i].copy_(torch.from_numpy(w[i].astype(np.int64)))
+            weights[lengths[i] - 1, i] = 1
             sent[lengths[i] - 1, i] = self.eos_index
 
+        if w is not None:
+            return sent, lengths, weights    
         return sent, lengths
 
     def remove_empty_sentences(self):
@@ -194,15 +200,12 @@ class Dataset(object):
                 sentence_ids = sentence_ids[:self.max_batch_size]
             pos = self.pos[sentence_ids]
             sent = [self.sent[a:b] for a, b in pos]
-            sent = self.batch_sentences(sent)
             if self.weights is not None:
-                weights = np.uint8([np.append(self.weights[a:b], 1) for a, b in pos])
-                weights = torch.tensor(weights).transpose(0,1).reshape(-1)
-                sent = (sent[0], sent[1], weights)
+                weights = [self.weights[a:b] for a, b in pos]
             else:
                 n_tokens = sent[1].sum().item() - sent[1].shape[0]
-                weights = torch.ByteTensor(n_tokens,).fill_(1)
-                sent = (sent[0], sent[1], weights)
+                weights = [np.ones_like(s) for s in sent]
+            sent = self.batch_sentences(sent, weights)
             yield (sent, sentence_ids) if return_indices else sent
 
     def get_iterator(self, shuffle, group_by_size=False, n_sentences=-1, seed=None, return_indices=False):

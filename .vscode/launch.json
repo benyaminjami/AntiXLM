@@ -4,7 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-
+    
         {
             "name": "Python: train.py",
             "type": "python",
@@ -13,7 +13,9 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "--cuda", "False",
+                "--cuda", "True",
+                
+                // "--amp", "1",
                 "--debug_train", "True",
                 "--exp_name", "unsupMT_agab",
                 "--dump_path", "./dumped/",
@@ -42,6 +44,7 @@
                 "--beam_size", "1", 
                 "--stopping_criterion", "valid_ag-ab_mt_bleu,10",
                 "--validation_metrics", "valid_ag-ab_mt_bleu",
+                "--master_port", "12345",
             ]
         }
     ]

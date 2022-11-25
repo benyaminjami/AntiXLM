@@ -118,7 +118,9 @@ def get_parser():
                         help="Minimum vocabulary count")
     parser.add_argument("--lg_sampling_factor", type=float, default=-1,
                         help="Language sampling factor")
-    parser.add_argument("--cdr_weidht", type=int, default=2, 
+    parser.add_argument("--skip_fw", type=bool_flag, default=True,
+                        help="Training on Frameworks or not")
+    parser.add_argument("--cdr_weight", type=int, default=2, 
                         help="Weight that the cdr losses will be multipled with")
 
     # batch parameters
@@ -269,16 +271,16 @@ def main(params):
         while trainer.n_sentences < trainer.epoch_size:
 
             # CLM steps
-            for lang1, lang2 in shuf_order(params.clm_steps, params):
-                trainer.clm_step(lang1, lang2, params.lambda_clm)
+            # for lang1, lang2 in shuf_order(params.clm_steps, params):
+            #     trainer.clm_step(lang1, lang2, params.lambda_clm)
 
-            # MLM steps (also includes TLM if lang2 is not None)
-            for lang1, lang2 in shuf_order(params.mlm_steps, params):
-                trainer.mlm_step(lang1, lang2, params.lambda_mlm)
+            # # MLM steps (also includes TLM if lang2 is not None)
+            # for lang1, lang2 in shuf_order(params.mlm_steps, params):
+            #     trainer.mlm_step(lang1, lang2, params.lambda_mlm)
 
-            # parallel classification steps
-            for lang1, lang2 in shuf_order(params.pc_steps, params):
-                trainer.pc_step(lang1, lang2, params.lambda_pc)
+            # # parallel classification steps
+            # for lang1, lang2 in shuf_order(params.pc_steps, params):
+            #     trainer.pc_step(lang1, lang2, params.lambda_pc)
 
             # denoising auto-encoder steps
             for lang in shuf_order(params.ae_steps):

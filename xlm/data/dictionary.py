@@ -178,6 +178,8 @@ class Dictionary(object):
             sentence_weights = [int(w) for w in list(line.rstrip())]
             weights.extend(sentence_weights)
             weights.append(-1)
+            if i % 1000000 == 0 and i > 0:
+                print(i)
         
         return np.int8(weights)
 
@@ -226,15 +228,20 @@ class Dictionary(object):
             sentences.append(1)  # EOS index
         f.close()
 
+
         # tensorize data
         positions = np.int64(positions)
-        if len(dico) < 1 << 16:
+        if len(dico) < 1 << 8:
+            sentences = np.uint8(sentences)
+        elif len(dico) < 1 << 16:
             sentences = np.uint16(sentences)
         elif len(dico) < 1 << 31:
             sentences = np.int32(sentences)
         else:
             raise Exception("Dictionary is too big.")
+
         assert sentences.min() >= 0
+
         data = {
             'dico': dico,
             'positions': positions,
@@ -242,10 +249,9 @@ class Dictionary(object):
             'unk_words': unk_words,
             'weights': weights,
         }
+
         if bin_path is not None:
             print("Saving the data to %s ..." % bin_path)
             torch.save(data, bin_path, pickle_protocol=4)
 
         return data
-
-    

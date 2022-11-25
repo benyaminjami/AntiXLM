@@ -12,7 +12,8 @@ from logging import getLogger
 from collections import OrderedDict
 import numpy as np 
 import xlm.utils as utils
-import torch       
+import torch  
+import wandb     
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -62,7 +63,7 @@ class Trainer(object):
         if params.multi_gpu and params.amp == -1:
             logger.info("Using nn.parallel.DistributedDataParallel ...")
             for name in self.MODEL_NAMES:
-                setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True))
+                setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True))
 
         # set optimizers
         self.set_optimizers()
@@ -261,8 +262,10 @@ class Trainer(object):
             if type(v) is list:
                 if len(v) > 0:
                     utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
+                    wandb.log({str(k): np.mean(v)}, step=self.n_total_iter)
             else:
                 utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)  
+                wandb.log({str(k): float(v)}, step=self.n_total_iter)
         
         s_iter = "%7i - " % self.n_total_iter
         s_stat = ' || '.join([
@@ -277,6 +280,7 @@ class Trainer(object):
         s_lr = " - "
         for k, v in self.optimizers.items():
             s_lr = s_lr + (" - %s LR: " % k) + " / ".join("{:.4e}".format(group['lr']) for group in v.param_groups)
+            wandb.log({'Learning Rate': float(v.param_groups[0]['lr'])}, step=self.n_total_iter)
 
         # processing speed
         new_time = time.time()
@@ -285,6 +289,9 @@ class Trainer(object):
             self.stats['processed_s'] * 1.0 / diff,
             self.stats['processed_w'] * 1.0 / diff
         )
+        wandb.log({'processed_s': float(self.stats['processed_s'] * 1.0 / diff),
+                   'processed_w': float(self.stats['processed_w'] * 1.0 / diff)}, step=self.n_total_iter)
+
         self.stats['processed_s'] = 0
         self.stats['processed_w'] = 0
         self.last_time = new_time
@@ -852,10 +859,11 @@ class EncDecTrainer(Trainer):
 
         # target words to predict
         alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
-        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
-        y = x2[1:].masked_select(pred_mask[:-1])
-        assert len(y) == (len2 - 1).sum().item()
-
+        pred_mask = (alen[:, None] < len2[None] - 1)[:-1] * (w2[1:] > 0)   # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask)
+        w2 = w2[1:].masked_select(pred_mask)
+        # assert len(y) == (len2 - 1).sum().item()
+        
         # cuda
         # TODO: GPU
         if self.params.cuda:
@@ -931,14 +939,15 @@ class EncDecTrainer(Trainer):
 
         # words to predict
         alen = torch.arange(len1.max(), dtype=torch.long, device=len1.device)
-        pred_mask = alen[:, None] < len1[None] - 1  # do not predict anything given the last target word
-        y1 = x1[1:].masked_select(pred_mask[:-1])
-
+        pred_mask = (alen[:, None] < len1[None] - 1)[:-1] * (w1[1:] > 0)   # do not predict anything given the last target word
+        y = x1[1:].masked_select(pred_mask)
+        w1 = w1[1:].masked_select(pred_mask)
+        
         # decode original sentence
         dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2)
 
         # loss
-        _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False, weights=w1)
+        _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y, get_scores=False, weights=w1)
         self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
         loss = lambda_coeff * loss
         # optimize
