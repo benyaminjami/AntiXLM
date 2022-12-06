@@ -28,7 +28,7 @@ if __name__ == '__main__':
     voc_path = sys.argv[1]
     txt_path = sys.argv[2]
     # voc_path = './vocab'
-    # txt_path = './data/test.ab'
+    # txt_path = '/h/benjami/AntiXLM/AntiXLM_data/antigen/valid.ag'
     bin_path = txt_path + '.pth'
     assert os.path.isfile(voc_path)
     assert os.path.isfile(txt_path)

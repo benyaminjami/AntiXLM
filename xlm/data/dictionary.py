@@ -16,16 +16,16 @@ from collections import defaultdict
 logger = getLogger()
 
 
-BOS_WORD = '<s>'
-EOS_WORD = '</s>'
-PAD_WORD = '<pad>'
-UNK_WORD = '<unk>'
+BOS_WORD = '[CLS]'
+EOS_WORD = '[SEP]'
+PAD_WORD = '[PAD]'
+UNK_WORD = '[UNK]'
 
 SPECIAL_WORD = '<special%i>'
 SPECIAL_WORDS = 10
 
-SEP_WORD = SPECIAL_WORD % 0
-MASK_WORD = SPECIAL_WORD % 1
+SEP_WORD = '[SEP]'
+MASK_WORD = '[MASK]'
 
 
 class Dictionary(object):
@@ -73,20 +73,15 @@ class Dictionary(object):
         """
         Check that the dictionary is valid.
         """
-        assert self.bos_index == 0
-        assert self.eos_index == 1
-        assert self.pad_index == 2
-        assert self.unk_index == 3
-        assert all(self.id2word[4 + i] == SPECIAL_WORD % i for i in range(SPECIAL_WORDS))
+        assert self.bos_index == 2
+        assert self.eos_index == 3
+        assert self.pad_index == 0
+        assert self.unk_index == 1
         assert len(self.id2word) == len(self.word2id) == len(self.counts)
         assert set(self.word2id.keys()) == set(self.counts.keys())
         for i in range(len(self.id2word)):
             assert self.word2id[self.id2word[i]] == i
-        last_count = 1e18
-        for i in range(4 + SPECIAL_WORDS, len(self.id2word) - 1):
-            count = self.counts[self.id2word[i]]
-            assert count <= last_count
-            last_count = count
+        
 
     def index(self, word, no_unk=False):
         """
@@ -101,6 +96,7 @@ class Dictionary(object):
         """
         Limit the vocabulary size.
         """
+        return
         assert max_vocab >= 1
         init_size = len(self)
         self.id2word = {k: v for k, v in self.id2word.items() if k < max_vocab}
@@ -114,6 +110,7 @@ class Dictionary(object):
         """
         Threshold on the word frequency counts.
         """
+        return
         assert min_count >= 0
         init_size = len(self)
         self.id2word = {k: v for k, v in self.id2word.items() if self.counts[self.id2word[k]] >= min_count or k < 4 + SPECIAL_WORDS}
@@ -130,9 +127,7 @@ class Dictionary(object):
         """
         skipped = 0
         assert os.path.isfile(vocab_path), vocab_path
-        word2id = {BOS_WORD: 0, EOS_WORD: 1, PAD_WORD: 2, UNK_WORD: 3}
-        for i in range(SPECIAL_WORDS):
-            word2id[SPECIAL_WORD % i] = 4 + i
+        word2id = {PAD_WORD: 0, UNK_WORD: 1, BOS_WORD: 2, EOS_WORD: 3, MASK_WORD: 4}
         counts = {k: 0 for k in word2id.keys()}
         f = open(vocab_path, 'r', encoding='utf-8')
         for i, line in enumerate(f):
@@ -154,7 +149,7 @@ class Dictionary(object):
                 skipped += 1
                 print('Empty word at line %s with count %s' % (i, line))
                 continue
-            word2id[line[0]] = 4 + SPECIAL_WORDS + i - skipped  # shift because of extra words
+            word2id[line[0]] = 5 + i - skipped  # shift because of extra words
             counts[line[0]] = int(line[1])
         f.close()
         id2word = {v: k for k, v in word2id.items()}
@@ -166,18 +161,18 @@ class Dictionary(object):
 
     @staticmethod
     def load_weights(path):
-        print("Loading weights")
+        
 
         if not os.path.isfile(path + '.weights'):
             return None
-
+        print("Loading weights")
         weights = []
 
         f = open(path + '.weights', 'r', encoding='utf-8')
         for i, line in enumerate(f):
             sentence_weights = [int(w) for w in list(line.rstrip())]
             weights.extend(sentence_weights)
-            weights.append(-1)
+            weights.append(1)
             if i % 1000000 == 0 and i > 0:
                 print(i)
         
@@ -213,10 +208,7 @@ class Dictionary(object):
             indexed = []
             for w in s:
                 word_id = dico.index(w, no_unk=False)
-                # if we find a special word which is not an unknown word, skip the sentence
-                if 0 <= word_id < 4 + SPECIAL_WORDS and word_id != 3:
-                    logger.warning('Found unexpected special word "%s" (%i)!!' % (w, word_id))
-                    continue
+
                 assert word_id >= 0
                 indexed.append(word_id)
                 if word_id == dico.unk_index:
@@ -225,7 +217,7 @@ class Dictionary(object):
             # add sentence
             positions.append([len(sentences), len(sentences) + len(indexed)])
             sentences.extend(indexed)
-            sentences.append(1)  # EOS index
+            sentences.append(dico.eos_index)  # EOS index
         f.close()
 
 

@@ -156,10 +156,10 @@ def init_distributed_mode(params):
     print(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
     print(PREFIX + "Hostname       : %s" % socket.gethostname())
     print(PREFIX + "GPU            : %s" % torch.cuda.device(torch.cuda.current_device()))
-    # params.local_rank = torch.cuda.current_device()
+    params.local_rank = torch.cuda.current_device()
     # set GPU device
     if params.cuda:
-        torch.cuda.set_device(params.local_rank)
+        torch.cuda.set_device(torch.cuda.current_device())
 
     # initialize multi-GPU
     if params.multi_gpu:

@@ -80,6 +80,7 @@ class Dataset(object):
     def __init__(self, sent, pos, weights, params):
 
         self.eos_index = params.eos_index
+        self.bos_index = params.bos_index
         self.pad_index = params.pad_index
         self.batch_size = params.batch_size
         self.tokens_per_batch = params.tokens_per_batch
@@ -128,7 +129,7 @@ class Dataset(object):
         sent = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(self.pad_index)
         weights = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(0)
         
-        sent[0] = self.eos_index
+        sent[0] = self.bos_index
         for i, s in enumerate(sentences):
             if lengths[i] > 2:  # if sentence not empty
                 sent[1:lengths[i] - 1, i].copy_(torch.from_numpy(s.astype(np.int64)))
@@ -203,7 +204,6 @@ class Dataset(object):
             if self.weights is not None:
                 weights = [self.weights[a:b] for a, b in pos]
             else:
-                n_tokens = sent[1].sum().item() - sent[1].shape[0]
                 weights = [np.ones_like(s) for s in sent]
             sent = self.batch_sentences(sent, weights)
             yield (sent, sentence_ids) if return_indices else sent
@@ -257,9 +257,10 @@ class Dataset(object):
 
 class ParallelDataset(Dataset):
 
-    def __init__(self, sent1, pos1, sent2, pos2, params):
+    def __init__(self, sent1, pos1, sent2, pos2, params, weights1=None, weights2=None):
 
         self.eos_index = params.eos_index
+        self.bos_index = params.bos_index
         self.pad_index = params.pad_index
         self.batch_size = params.batch_size
         self.tokens_per_batch = params.tokens_per_batch
@@ -271,7 +272,9 @@ class ParallelDataset(Dataset):
         self.pos2 = pos2
         self.lengths1 = self.pos1[:, 1] - self.pos1[:, 0]
         self.lengths2 = self.pos2[:, 1] - self.pos2[:, 0]
-
+        self.weights1 = weights1
+        self.weights2 = weights2
+        
         # check number of sentences
         assert len(self.pos1) == (self.sent1 == self.eos_index).sum()
         assert len(self.pos2) == (self.sent2 == self.eos_index).sum()

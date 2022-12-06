@@ -8,6 +8,7 @@
 from logging import getLogger
 import math
 import itertools
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -241,7 +242,7 @@ class TransformerFFN(nn.Module):
 
 class TransformerModel(nn.Module):
 
-    ATTRIBUTES = ['encoder', 'with_output', 'eos_index', 'pad_index', 'n_langs', 'n_words', 'dim', 'n_layers', 'n_heads', 'hidden_dim', 'dropout', 'attention_dropout', 'asm', 'asm_cutoffs', 'asm_div_value']
+    ATTRIBUTES = ['encoder', 'with_output', 'bos_index', 'eos_index', 'pad_index', 'n_langs', 'n_words', 'dim', 'n_layers', 'n_heads', 'hidden_dim', 'dropout', 'attention_dropout', 'asm', 'asm_cutoffs', 'asm_div_value']
 
     def __init__(self, params, dico, is_encoder, with_output):
         """
@@ -257,8 +258,10 @@ class TransformerModel(nn.Module):
         # dictionary / languages
         self.n_langs = params.n_langs
         self.n_words = params.n_words
+        self.bos_index = params.bos_index
         self.eos_index = params.eos_index
         self.pad_index = params.pad_index
+        self.drop_net = params.drop_net
         self.dico = dico
         self.id2lang = params.id2lang
         self.lang2id = params.lang2id
@@ -286,6 +289,7 @@ class TransformerModel(nn.Module):
 
         # transformer layers
         self.attentions = nn.ModuleList()
+        self.bert_attentions = nn.ModuleList()
         self.layer_norm1 = nn.ModuleList()
         self.ffns = nn.ModuleList()
         self.layer_norm2 = nn.ModuleList()
@@ -304,6 +308,7 @@ class TransformerModel(nn.Module):
 
         for layer_id in range(self.n_layers):
             self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+            self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             self.layer_norm1.append(nn.LayerNorm(self.dim, eps=1e-12))
             if self.is_decoder:
                 self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
@@ -332,7 +337,7 @@ class TransformerModel(nn.Module):
         else:
             raise Exception("Unknown mode: %s" % mode)
 
-    def fwd(self, x, lengths, causal, src_enc=None, src_len=None, positions=None, langs=None, cache=None):
+    def fwd(self, x, lengths, causal, bert_embed=None, src_enc=None, src_len=None, positions=None, langs=None, cache=None):
         """
         Inputs:
             `x` LongTensor(slen, bs), containing word indices
@@ -393,16 +398,39 @@ class TransformerModel(nn.Module):
 
         # transformer layers
         for i in range(self.n_layers):
-
+            r_net = 1
+            if self.training:
+                r_net = random.random()
             # self attention
-            attn = self.attentions[i](tensor, attn_mask, cache=cache)
+            if self.is_decoder or bert_embed is None:
+                attn = self.attentions[i](tensor, attn_mask, cache=cache)
+            else:
+                attn, bert_attn = 0, 0
+                if r_net < self.drop_net/2:
+                    attn = 2 * self.attentions[i](tensor, attn_mask, cache=cache)
+                elif r_net > 1 - self.drop_net/2:
+                    bert_attn = 2 * self.bert_attentions[i](tensor, attn_mask, kv=bert_embed)
+                else:
+                    attn = self.attentions[i](tensor, attn_mask, cache=cache)
+                    bert_attn = self.bert_attentions[i](tensor, attn_mask, kv=bert_embed)
+                    
+                attn = 0.5*attn + 0.5*bert_attn
             attn = F.dropout(attn, p=self.dropout, training=self.training)
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
 
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
-                attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                attn, bert_attn = 0, 0
+                if r_net < self.drop_net/2 or bert_embed is None:
+                    attn = 2 * self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                elif r_net > 1 - self.drop_net/2:
+                    bert_attn = 2 * self.bert_attentions[i](tensor, src_mask, kv=bert_embed)
+                else:
+                    attn = 2 * self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                    bert_attn = 2 * self.bert_attentions[i](tensor, src_mask, kv=bert_embed)
+
+                attn = 0.5*attn + 0.5*bert_attn
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
@@ -443,13 +471,13 @@ class TransformerModel(nn.Module):
         scores, loss = self.pred_layer(masked_tensor, y, weights, get_scores)
         return scores, loss
 
-    def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):
+    def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None, bert_embed=None):
         """
         Decode a sentence given initial start.
         `x`:
             - LongTensor(bs, slen)
-                <EOS> W1 W2 W3 <EOS> <PAD>
-                <EOS> W1 W2 W3   W4  <EOS>
+                <BOS> W1 W2 W3 <EOS> <PAD>
+                <BOS> W1 W2 W3   W4  <EOS>
         `lengths`:
             - LongTensor(bs) [5, 6]
         `positions`:
@@ -468,7 +496,7 @@ class TransformerModel(nn.Module):
         # generated sentences
         generated = src_len.new(max_len, bs)  # upcoming output
         generated.fill_(self.pad_index)       # fill upcoming ouput with <PAD>
-        generated[0].fill_(self.eos_index)    # we use <EOS> for <BOS> everywhere
+        generated[0].fill_(self.bos_index)    
 
         # positions
         positions = src_len.new(max_len).long()
@@ -498,7 +526,8 @@ class TransformerModel(nn.Module):
                 causal=True,
                 src_enc=src_enc,
                 src_len=src_len,
-                cache=cache
+                cache=cache,
+                bert_embed=bert_embed
             )
             assert tensor.size() == (1, bs, self.dim), (cur_len, max_len, src_enc.size(), tensor.size(), (1, bs, self.dim))
             tensor = tensor.data[-1, :, :].type_as(src_enc)  # (bs, dim)
@@ -526,11 +555,12 @@ class TransformerModel(nn.Module):
             generated[-1].masked_fill_(unfinished_sents.bool(), self.eos_index)
 
         # sanity check
-        assert (generated == self.eos_index).sum() == 2 * bs
+        assert (generated[0] == self.bos_index).sum() == bs
+        assert (generated == self.eos_index).sum() == bs
         
         return generated[:cur_len], gen_len
 
-    def generate_beam(self, src_enc, src_len, tgt_lang_id, beam_size, length_penalty, early_stopping, max_len=200):
+    def generate_beam(self, src_enc, src_len, tgt_lang_id, beam_size, length_penalty, early_stopping, max_len=200, bert_embed=None):
         """
         Decode a sentence given initial start.
         `x`:
@@ -601,7 +631,8 @@ class TransformerModel(nn.Module):
                 causal=True,
                 src_enc=src_enc,
                 src_len=src_len,
-                cache=cache
+                cache=cache,
+                bert_embed=bert_embed
             )
             assert tensor.size() == (1, bs * beam_size, self.dim)
             tensor = tensor.data[-1, :, :]               # (bs * beam_size, dim)

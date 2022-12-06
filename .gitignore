@@ -21,8 +21,14 @@ eggs/
 lib/
 lib64/
 parts/
+dumped*/
+*.out
+*.err
 sdist/
 var/
+local-pt-checkpoint/
+data/
+AntiXLM_data/
 AntiXLM/
 wandb/
 wheels/

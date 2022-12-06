@@ -17,13 +17,14 @@ import wandb
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
+from transformers import BertModel
 # import apex
 
 from .optim import get_optimizer
 from .utils import to_cuda, concat_batches, find_modules
 from .utils import parse_lambda_config, update_lambdas
 from .model.memory import HashingMemory
-from .model.transformer import TransformerFFN
+from .model.transformer import TransformerFFN, get_masks
 
 
 logger = getLogger()
@@ -376,7 +377,9 @@ class Trainer(object):
 
         # define words to drop
         eos = self.params.eos_index
-        assert (x[0] == eos).sum() == l.size(0)
+        bos = self.params.bos_index
+        assert (x[0] == bos).sum() == l.size(0)
+        assert (x == eos).sum() == l.size(0)
         keep = np.random.rand(x.size(0) - 1, x.size(1)) >= self.params.word_dropout
         keep[0] = 1  # do not drop the start sentence symbol
 
@@ -391,7 +394,7 @@ class Trainer(object):
             if len(new_s) == 1:
                 new_s.append(words[np.random.randint(1, len(words))])
             new_s.append(eos)
-            assert len(new_s) >= 3 and new_s[0] == eos and new_s[-1] == eos
+            assert len(new_s) >= 3 and new_s[0] == bos and new_s[-1] == eos
             sentences.append(new_s)
             lengths.append(len(new_s))
         # re-construct input
@@ -411,7 +414,9 @@ class Trainer(object):
 
         # define words to blank
         eos = self.params.eos_index
-        assert (x[0] == eos).sum() == l.size(0)
+        bos = self.params.bos_index
+        assert (x[0] == bos).sum() == l.size(0)
+        assert (x == eos).sum() == l.size(0)
         keep = np.random.rand(x.size(0) - 1, x.size(1)) >= self.params.word_blank
         keep[0] = 1  # do not blank the start sentence symbol
 
@@ -422,7 +427,7 @@ class Trainer(object):
             # randomly blank words from the input
             new_s = [w if keep[j, i] else self.params.mask_index for j, w in enumerate(words)]
             new_s.append(eos)
-            assert len(new_s) == l[i] and new_s[0] == eos and new_s[-1] == eos
+            assert len(new_s) == l[i] and new_s[0] == bos and new_s[-1] == eos
             sentences.append(new_s)
         # re-construct input
         x2 = torch.LongTensor(l.max(), l.size(0)).fill_(self.params.pad_index)
@@ -829,6 +834,14 @@ class EncDecTrainer(Trainer):
         self.decoder = decoder
         self.data = data
         self.params = params
+        self.fused_bert = self.params.fused_bert
+        self.bert = None
+        if self.fused_bert:
+            self.bert = BertModel.from_pretrained("Rostlab/prot_bert")
+            self.bert.eval()
+            if self.params.cuda:
+                self.bert = self.bert.cuda()
+
 
         super().__init__(data, params)
 
@@ -862,19 +875,25 @@ class EncDecTrainer(Trainer):
         pred_mask = (alen[:, None] < len2[None] - 1)[:-1] * (w2[1:] > 0)   # do not predict anything given the last target word
         y = x2[1:].masked_select(pred_mask)
         w2 = w2[1:].masked_select(pred_mask)
+        
+        token_type_ids = torch.zeros_like(x1)
         # assert len(y) == (len2 - 1).sum().item()
         
         # cuda
         # TODO: GPU
         if self.params.cuda:
-            x1, len1, langs1, x2, len2, langs2, y, w2 = to_cuda(x1, len1, langs1, x2, len2, langs2, y, w2)
+            x1, len1, langs1, x2, len2, langs2, y, w2, token_type_ids = to_cuda(x1, len1, langs1, x2, len2, langs2, y, w2, token_type_ids)
 
+        bert_embed = None
+        if self.fused_bert:
+            with torch.no_grad():
+                bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
         # encode source sentence
-        enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
         enc1 = enc1.transpose(0, 1)
 
         # decode target sentence
-        dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+        dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
 
         # loss
         _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False, weights=w2)
@@ -885,7 +904,7 @@ class EncDecTrainer(Trainer):
         self.optimize(loss)
 
         # number of processed sentences / words
-        self.n_sentences += x1.shape[1]
+        self.n_sentences += params.batch_size
         self.stats['processed_s'] += len2.size(0)
         self.stats['processed_w'] += (len2 - 1).sum().item()
 
@@ -908,10 +927,12 @@ class EncDecTrainer(Trainer):
         x1, len1, w1 = self.get_batch('bt', lang1)
         langs1 = x1.clone().fill_(lang1_id)
 
+        token_type_ids = torch.zeros_like(x1)
+
         # cuda
         # TODO: GPU
         if self.params.cuda:
-            x1, len1, langs1, w1 = to_cuda(x1, len1, langs1, w1)
+            x1, len1, langs1, w1, token_type_ids = to_cuda(x1, len1, langs1, w1, token_type_ids)
 
         # generate a translation
         with torch.no_grad():
@@ -920,12 +941,24 @@ class EncDecTrainer(Trainer):
             self.encoder.eval()
             self.decoder.eval()
 
+
+            bert_embed = None
+            if self.fused_bert:
+                bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
+
             # encode source sentence and translate it
-            enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
+            enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
             enc1 = enc1.transpose(0, 1)
             
-            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2])
+            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed)
             langs2 = x2.clone().fill_(lang2_id)
+
+            bert_embed = None
+            if self.fused_bert:
+                token_type_ids = torch.zeros_like(x2)
+                if self.params.cuda:
+                    token_type_ids, = to_cuda(token_type_ids)
+                bert_embed = self.bert(input_ids=x2.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x2.size()[0], len2, False)[0]).last_hidden_state
 
             # free CUDA memory
             del enc1
@@ -934,7 +967,7 @@ class EncDecTrainer(Trainer):
             self.encoder.train()
             self.decoder.train()
         # encode generate sentence
-        enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False)
+        enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False, bert_embed=bert_embed)
         enc2 = enc2.transpose(0, 1)
 
         # words to predict
@@ -944,7 +977,7 @@ class EncDecTrainer(Trainer):
         w1 = w1[1:].masked_select(pred_mask)
         
         # decode original sentence
-        dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2)
+        dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2, bert_embed=bert_embed)
 
         # loss
         _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y, get_scores=False, weights=w1)
@@ -954,6 +987,6 @@ class EncDecTrainer(Trainer):
         self.optimize(loss)
 
         # number of processed sentences / words
-        self.n_sentences += x1.shape[1]
+        self.n_sentences += params.batch_size
         self.stats['processed_s'] += len1.size(0)
         self.stats['processed_w'] += (len1 - 1).sum().item()

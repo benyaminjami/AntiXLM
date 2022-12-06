@@ -4,6 +4,21 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
+
+        {
+            "name": "Python: preprocess",
+            "type": "python",
+            "request": "launch",
+            "program": "preprocess.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "/h/benjami/AntiXLM/AntiXLM_data/antigen/test.ag", "vocab"
+            ]
+        }
+    ,
+
     
         {
             "name": "Python: train.py",
@@ -14,24 +29,24 @@
             "justMyCode": false,
             "args": [
                 "--cuda", "True",
-                
                 // "--amp", "1",
                 "--debug_train", "True",
                 "--exp_name", "unsupMT_agab",
-                "--dump_path", "./dumped/",
+                "--dump_path", "./dumped_test/",
                 "--data_path", "./data/",
                 "--lgs", "ab-ag",
                 "--ae_steps", "ab,ag",
                 "--bt_steps", "ab-ag-ab,ag-ab-ag",
+                // "--mt_steps", "ag-ab",
                 "--word_shuffle", "3",
                 "--word_dropout", "0.1",
                 "--word_blank", "0.1" ,
                 "--lambda_ae", "0:1,100000:0.1,300000:0" ,
                 "--max_len", "160,250" ,
                 "--encoder_only", "false" ,
-                "--emb_dim", "256" ,
+                "--emb_dim", "1024" ,
                 "--n_layers", "4" ,
-                "--n_heads", "8" ,
+                "--n_heads", "4" ,
                 "--dropout", "0.1",
                 "--attention_dropout", "0.1" ,
                 "--gelu_activation", "true" ,
@@ -39,7 +54,7 @@
                 "--batch_size", "32" ,
                 "--bptt", "256" ,
                 "--optimizer", "adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001",
-                "--epoch_size", "70000",
+                "--epoch_size", "2000",
                 "--eval_bleu", "true",
                 "--beam_size", "1", 
                 "--stopping_criterion", "valid_ag-ab_mt_bleu,10",

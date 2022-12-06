@@ -11,7 +11,7 @@ import subprocess
 from collections import OrderedDict
 import numpy as np
 import torch
-
+from ..model.transformer import get_masks
 from ..utils import to_cuda, restore_segmentation, concat_batches
 from ..model.memory import HashingMemory
 
@@ -411,7 +411,7 @@ class SingleEvaluator(Evaluator):
 
 class EncDecEvaluator(Evaluator):
 
-    def __init__(self, trainer, data, params):
+    def __init__(self, trainer, data, params, bert):
         """
         Build encoder / decoder evaluator.
         """
@@ -420,6 +420,9 @@ class EncDecEvaluator(Evaluator):
         self.decoder = trainer.decoder
         self.cuda = params.cuda
         self.params = params
+        self.fused_bert = params.fused_bert
+        if self.fused_bert:
+            self.bert = bert
 
     def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
         """
@@ -467,22 +470,28 @@ class EncDecEvaluator(Evaluator):
 
             # target words to predict
             alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
-            pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
-            y = x2[1:].masked_select(pred_mask[:-1])
-            assert len(y) == (len2 - 1).sum().item()
-
+            pred_mask = (alen[:, None] < len2[None] - 1)[:-1]   # do not predict anything given the last target word
+            y = x2[1:].masked_select(pred_mask)
+            
+            token_type_ids = torch.zeros_like(x1)
+            # assert len(y) == (len2 - 1).sum().item()
+            
             # cuda
-            #TODO: GPU
-            if self.cuda:
-                x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+            # TODO: GPU
+            if self.params.cuda:
+                x1, len1, langs1, x2, len2, langs2, y, token_type_ids = to_cuda(x1, len1, langs1, x2, len2, langs2, y, token_type_ids)
 
+            bert_embed = None
+            if self.fused_bert:
+                with torch.no_grad():
+                    bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
             # encode source sentence
-            enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
+            enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
             enc1 = enc1.transpose(0, 1)
             enc1 = enc1.half() if params.fp16 else enc1
 
             # decode target sentence
-            dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+            dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
 
             # loss
             word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
@@ -500,7 +509,7 @@ class EncDecEvaluator(Evaluator):
                 
                 # max_len = int(1.5 * len1.max().item() + 10)
                 if params.beam_size == 1:
-                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2])
+                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2], bert_embed=bert_embed)
                 else:
                     generated, lengths = decoder.generate_beam(
                         enc1, len1, lang2_id, beam_size=params.beam_size,
@@ -509,8 +518,12 @@ class EncDecEvaluator(Evaluator):
                         max_len=self.params.max_len[langs2]
                     )
                 hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
-                forward_result.extend(convert_to_text(word_scores.max(1)[1], len2, self.dico, params, 'ae'))
-
+                forward_result.extend(convert_to_text(word_scores.max(1)[1],
+                    len2, 
+                    self.dico, 
+                    params, 
+                    'ae',
+                    torch.arange(len(len2), dtype=torch.long, device=pred_mask.device).repeat(pred_mask.shape[0],1).masked_select(pred_mask)))
 
         if lang1 != lang2:
             # compute perplexity and prediction accuracy
@@ -552,7 +565,7 @@ class EncDecEvaluator(Evaluator):
                 scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
 
 
-def convert_to_text(batch, lengths, dico, params, mode='mt'):
+def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
     """
     Convert a batch of sentences to a list of text sentences.
     """
@@ -562,8 +575,8 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
     if mode == 'mt':
         slen, bs = batch.shape
         assert lengths.max() == slen and lengths.shape[0] == bs
-        assert (batch[0] == params.eos_index).sum() == bs
-        assert (batch == params.eos_index).sum() == 2 * bs
+        assert (batch[0] == params.bos_index).sum() == bs or (batch[0] == params.eos_index).sum() == bs
+        assert (batch == params.eos_index).sum() == bs
         sentences = []
 
         for j in range(bs):
@@ -575,18 +588,10 @@ def convert_to_text(batch, lengths, dico, params, mode='mt'):
             sentences.append(" ".join(words))
     else:
         sentences = [[] for _ in range(len(lengths))]
-        step = len(lengths)
-        i = 0
+        for i in range(len(map)):
+            sentences[map[i]].append(dico[batch[i]])
 
-        while step > 0:
-            for j in range(len(lengths)):
-                if i < lengths[j]-1:
-                    sentences[j].append(dico[batch[j + i*step]])
-                else:
-                    step -= 1
-            i+=1
-
-        sentences = [" ".join(words) for words in sentences]
+        sentences = [" ".join(words[1:-1]) for words in sentences]
     return sentences
 
 

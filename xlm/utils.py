@@ -56,9 +56,12 @@ def initialize_exp(params):
     global board_writer
 
     t = datetime.datetime.now()
-    t = t.replace(second=0, microsecond=0, minute=(t.minute%12)*5)
+    # t = t.replace(second=0, microsecond=0, minute=(t.minute%12)*5)
+    t = "2022-11-29 22:25:00"
     wandb.init(project=params.exp_name,
                group='DDP' + str(t))
+    wandb.run.name = 'Worker_' + str(params.global_rank) 
+    wandb.run.save()
 
     # dump parameters
     get_dump_path(params)

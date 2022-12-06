@@ -7,6 +7,7 @@
 
 import json
 import random
+import wandb
 import argparse
 import xlm.utils as utils
 
@@ -57,6 +58,8 @@ def get_parser():
                         help="Number of Transformer heads")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout")
+    parser.add_argument("--drop_net", type=float, default=1.0,
+                        help="Drop_net Prob")
     parser.add_argument("--attention_dropout", type=float, default=0.1,
                         help="Dropout in the attention layer")
     parser.add_argument("--gelu_activation", type=bool_flag, default=True,
@@ -67,6 +70,8 @@ def get_parser():
                         help="Use sinusoidal embeddings")
     parser.add_argument("--use_lang_emb", type=bool_flag, default=True,
                         help="Use language embedding")
+    parser.add_argument("--fused_bert", type=bool_flag, default=True,
+                        help="INCORPORATING BERT INTO NEURAL MACHINE TRANSLATION")
 
     # memory parameters
     parser.add_argument("--use_memory", type=bool_flag, default=False,
@@ -176,6 +181,8 @@ def get_parser():
                         help="Masked prediction steps (MLM / TLM)")
     parser.add_argument("--mt_steps", type=str, default="",
                         help="Machine translation steps")
+    parser.add_argument("--mt_steps_ratio", type=int, default=25,
+                        help="Machine translation steps ratio")
     parser.add_argument("--ae_steps", type=str, default="at,ag",
                         help="Denoising auto-encoder steps")
     parser.add_argument("--bt_steps", type=str, default="at-ag-at,ag-at-ag",
@@ -248,7 +255,8 @@ def main(params):
         evaluator = SingleEvaluator(trainer, data, params)
     else:
         trainer = EncDecTrainer(encoder, decoder, data, params)
-        evaluator = EncDecEvaluator(trainer, data, params)
+        evaluator = EncDecEvaluator(trainer, data, params, trainer.bert)
+    logger.info("Models Created")
 
     # evaluation
     if params.eval_only:
@@ -286,9 +294,10 @@ def main(params):
             for lang in shuf_order(params.ae_steps):
                 trainer.mt_step(lang, lang, params.lambda_ae)
 
-            # machine translation steps
-            for lang1, lang2 in shuf_order(params.mt_steps, params):
-                trainer.mt_step(lang1, lang2, params.lambda_mt)
+            if trainer.n_iter % params.mt_steps_ratio == 0:
+                # machine translation steps
+                for lang1, lang2 in shuf_order(params.mt_steps, params):
+                    trainer.mt_step(lang1, lang2, params.lambda_mt)
 
             # back-translation steps
             for lang1, lang2, lang3 in shuf_order(params.bt_steps):
@@ -308,6 +317,8 @@ def main(params):
             logger.info("%s -> %.6f" % (k, v))
         for k in scores:
             utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
+            wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
+
         if params.is_master:
             logger.info("__log__:%s" % json.dumps(scores))
 

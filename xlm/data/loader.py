@@ -22,7 +22,8 @@ def process_binarized(data, params):
     Process a binarized dataset and log main statistics.
     """
     dico = data['dico']
-    assert ((data['sentences'].dtype == np.uint16) and (len(dico) < 1 << 16) or
+    assert ((data['sentences'].dtype == np.uint8) and (len(dico) < 1 << 8) or
+            (data['sentences'].dtype == np.uint16) and (len(dico) < 1 << 16) or
             (data['sentences'].dtype == np.int32) and (1 << 16 <= len(dico) < 1 << 31))
     logger.info("%i words (%i unique) in %i sentences. %i unknown words (%i unique) covering %.2f%% of the data." % (
         len(data['sentences']) - len(data['positions']),
@@ -200,7 +201,7 @@ def load_para_data(params, data):
             dataset = ParallelDataset(
                 src_data['sentences'], src_data['positions'],
                 tgt_data['sentences'], tgt_data['positions'],
-                params
+                params, src_data.get('weights', None), tgt_data.get('weights', None)
             )
 
             # remove empty and too long sentences
