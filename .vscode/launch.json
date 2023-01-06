@@ -4,6 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+    
         
 
         {
@@ -27,6 +28,9 @@
             "program": "train.py",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "env": {
+                "LOCAL_RAN": "0"
+              },
             "args": [
                 "--cuda", "True",
                 // "--amp", "1",
@@ -37,7 +41,9 @@
                 "--lgs", "ab-ag",
                 "--ae_steps", "ab,ag",
                 "--bt_steps", "ab-ag-ab,ag-ab-ag",
-                // "--mt_steps", "ag-ab",
+                "--mt_steps", "ag-ab,ab-ag",
+                "--mt_steps_ratio", "25",
+                "--mt_steps_warmup", "0",
                 "--word_shuffle", "3",
                 "--word_dropout", "0.1",
                 "--word_blank", "0.1" ,
@@ -46,20 +52,19 @@
                 "--encoder_only", "false" ,
                 "--emb_dim", "1024" ,
                 "--n_layers", "4" ,
-                "--n_heads", "4" ,
+                "--n_heads", "8" ,
                 "--dropout", "0.1",
                 "--attention_dropout", "0.1" ,
                 "--gelu_activation", "true" ,
-                "--tokens_per_batch", "2000" ,
-                "--batch_size", "32" ,
-                "--bptt", "256" ,
-                "--optimizer", "adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001",
-                "--epoch_size", "2000",
+                "--tokens_per_batch", "1000" ,
+                "--batch_size", "128" ,
+                "--optimizer", "adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.001",
+                "--epoch_size", "1000",
                 "--eval_bleu", "true",
-                "--beam_size", "1", 
+                "--beam_size", "5", 
                 "--stopping_criterion", "valid_ag-ab_mt_bleu,10",
                 "--validation_metrics", "valid_ag-ab_mt_bleu",
-                "--master_port", "12345",
+                "--master_port", "-1",
             ]
         }
     ]

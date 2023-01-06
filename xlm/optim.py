@@ -102,8 +102,8 @@ class AdamInverseSqrtWithWarmup(Adam):
         decay_factor = lr * sqrt(warmup_updates)
     """
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, warmup_updates=4000, warmup_init_lr=1e-7,
-                 exp_factor=0.5):
+                 weight_decay=0, warmup_updates=5000, warmup_init_lr=1e-7,
+                 exp_factor=0.5, second_drop=15000):
         super().__init__(
             params,
             lr=warmup_init_lr,
@@ -115,22 +115,31 @@ class AdamInverseSqrtWithWarmup(Adam):
         # linearly warmup for the first warmup_updates
         self.warmup_updates = warmup_updates
         self.warmup_init_lr = warmup_init_lr
-        warmup_end_lr = lr
-        self.lr_step = (warmup_end_lr - warmup_init_lr) / warmup_updates
+        self.warmup_end_lr = lr
+
+        self.lr_step = (self.warmup_end_lr - warmup_init_lr) / warmup_updates
+        self.second_drop = second_drop
 
         # then, decay prop. to the inverse square root of the update number
         self.exp_factor = exp_factor
-        self.decay_factor = warmup_end_lr * warmup_updates ** self.exp_factor
+        self.decay_factor = self.warmup_end_lr * warmup_updates ** self.exp_factor
+
+        self.second_drop = False
 
         # total number of updates
         for param_group in self.param_groups:
             param_group['num_updates'] = 0
 
     def get_lr_for_step(self, num_updates):
+        # if not self.second_drop and num_updates > self.second_drop:
+        #     self.decay_factor = self.decay_factor * (num_updates ** -self.exp_factor)
+        #     self.second_drop = True
         if num_updates < self.warmup_updates:
             return self.warmup_init_lr + num_updates * self.lr_step
-        else:
+        else: #num_updates < self.second_drop:
             return self.decay_factor * (num_updates ** -self.exp_factor)
+        # else:
+        #     return self.decay_factor * ((num_updates-10000) ** -self.exp_factor)
 
     def step(self, closure=None):
         super().step(closure)

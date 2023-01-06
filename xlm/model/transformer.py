@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .memory import HashingMemory
+# from .memory import HashingMemory
 
 
 N_MAX_POSITIONS = 512  # maximum input sequence length
@@ -154,7 +154,7 @@ class MultiHeadAttention(nn.Module):
 
     NEW_ID = itertools.count()
 
-    def __init__(self, n_heads, dim, dropout):
+    def __init__(self, n_heads, dim, dropout, n_langs=None):
         super().__init__()
         self.layer_id = next(MultiHeadAttention.NEW_ID)
         self.dim = dim
@@ -165,9 +165,15 @@ class MultiHeadAttention(nn.Module):
         self.q_lin = Linear(dim, dim)
         self.k_lin = Linear(dim, dim)
         self.v_lin = Linear(dim, dim)
-        self.out_lin = Linear(dim, dim)
+        self.n_langs = n_langs
+        if n_langs is None:
+            self.out_lin = Linear(dim, dim)
+        else:
+            self.out_lin = nn.ModuleList()
+            for i in range(n_langs):
+                self.out_lin.append(Linear(dim, dim))
 
-    def forward(self, input, mask, kv=None, cache=None):
+    def forward(self, input, mask, kv=None, cache=None, segment_label=None):
         """
         Self-attention (if kv is None) or attention over source sentence (provided by kv).
         """
@@ -220,7 +226,11 @@ class MultiHeadAttention(nn.Module):
         context = torch.matmul(weights, v)                                    # (bs, n_heads, qlen, dim_per_head)
         context = unshape(context)                                            # (bs, qlen, dim)
 
-        return self.out_lin(context)
+        if self.n_langs is None:
+            return self.out_lin(context)
+        else:
+            return self.out_lin[segment_label](context) 
+            # + 1e-5 * self.out_lin[int(not segment_label)](context)
 
 
 class TransformerFFN(nn.Module):
@@ -265,7 +275,7 @@ class TransformerModel(nn.Module):
         self.dico = dico
         self.id2lang = params.id2lang
         self.lang2id = params.lang2id
-        self.use_lang_emb = getattr(params, 'use_lang_emb', True)
+        self.lang_emb = params.lang_emb
         assert len(self.dico) == self.n_words
         assert len(self.id2lang) == len(self.lang2id) == self.n_langs
 
@@ -282,7 +292,7 @@ class TransformerModel(nn.Module):
         self.position_embeddings = Embedding(N_MAX_POSITIONS, self.dim)
         if params.sinusoidal_embeddings:
             create_sinusoidal_embeddings(N_MAX_POSITIONS, self.dim, out=self.position_embeddings.weight)
-        if params.n_langs > 1 and self.use_lang_emb:
+        if params.n_langs > 1 and self.lang_emb == 'emb':
             self.lang_embeddings = Embedding(self.n_langs, self.dim)
         self.embeddings = Embedding(self.n_words, self.dim, padding_idx=self.pad_index)
         self.layer_norm_emb = nn.LayerNorm(self.dim, eps=1e-12)
@@ -297,26 +307,22 @@ class TransformerModel(nn.Module):
             self.layer_norm15 = nn.ModuleList()
             self.encoder_attn = nn.ModuleList()
 
-        # memories
-        self.memories = nn.ModuleDict()
-        if getattr(params, 'use_memory', False):
-            mem_positions = params.mem_enc_positions if is_encoder else params.mem_dec_positions
-            for layer_id, pos in mem_positions:
-                assert 0 <= layer_id <= params.n_layers - 1
-                assert pos in ['in', 'after']
-                self.memories['%i_%s' % (layer_id, pos)] = HashingMemory.build(self.dim, self.dim, params)
-
         for layer_id in range(self.n_layers):
             self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
-            self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             self.layer_norm1.append(nn.LayerNorm(self.dim, eps=1e-12))
             if self.is_decoder:
                 self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
-                self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
-            if ('%i_in' % layer_id) in self.memories:
-                self.ffns.append(None)
+                if self.lang_emb == "layer":
+                    self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
+                    self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
+                else:
+                    self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+                    self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             else:
-                self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout, gelu_activation=params.gelu_activation))
+                self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+            
+            
+            self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout, gelu_activation=params.gelu_activation))
             self.layer_norm2.append(nn.LayerNorm(self.dim, eps=1e-12))
 
         # output layer
@@ -324,7 +330,7 @@ class TransformerModel(nn.Module):
             self.pred_layer = PredLayer(params)
             if params.share_inout_emb:
                 self.pred_layer.proj.weight = self.embeddings.weight
-
+    
     def forward(self, mode, **kwargs):
         """
         Forward function with different forward modes.
@@ -337,7 +343,7 @@ class TransformerModel(nn.Module):
         else:
             raise Exception("Unknown mode: %s" % mode)
 
-    def fwd(self, x, lengths, causal, bert_embed=None, src_enc=None, src_len=None, positions=None, langs=None, cache=None):
+    def fwd(self, x, lengths, causal, bert_embed=None, src_enc=None, src_len=None, positions=None, langs=None, cache=None, bert_cache=None):
         """
         Inputs:
             `x` LongTensor(slen, bs), containing word indices
@@ -390,31 +396,34 @@ class TransformerModel(nn.Module):
         # embeddings
         tensor = self.embeddings(x)
         tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
-        if langs is not None and self.use_lang_emb:
+        if langs is not None and self.lang_emb == 'emb':
             tensor = tensor + self.lang_embeddings(langs)
         tensor = self.layer_norm_emb(tensor)
         tensor = F.dropout(tensor, p=self.dropout, training=self.training)
         tensor *= mask.unsqueeze(-1).to(tensor.dtype)
-
+        lang_id = langs.max()
         # transformer layers
         for i in range(self.n_layers):
-            r_net = 1
-            if self.training:
-                r_net = random.random()
+
+            r_net = random.random()
             # self attention
             if self.is_decoder or bert_embed is None:
                 attn = self.attentions[i](tensor, attn_mask, cache=cache)
             else:
                 attn, bert_attn = 0, 0
-                if r_net < self.drop_net/2:
-                    attn = 2 * self.attentions[i](tensor, attn_mask, cache=cache)
+                if not self.training:
+                    attn_coef, bert_attn_coef = 1, 1
+                elif r_net < self.drop_net/2:
+                    attn_coef = 2 - 1e-4
+                    bert_attn_coef = 1e-4
                 elif r_net > 1 - self.drop_net/2:
-                    bert_attn = 2 * self.bert_attentions[i](tensor, attn_mask, kv=bert_embed)
-                else:
-                    attn = self.attentions[i](tensor, attn_mask, cache=cache)
-                    bert_attn = self.bert_attentions[i](tensor, attn_mask, kv=bert_embed)
+                    bert_attn_coef = 2 - 1e-4
+                    attn_coef = 1e-4
                     
-                attn = 0.5*attn + 0.5*bert_attn
+                attn = self.attentions[i](tensor, attn_mask, cache=cache)
+                bert_attn = self.bert_attentions[i](tensor, attn_mask, kv=bert_embed, cache=bert_cache)
+                
+                attn = 0.5*attn_coef*attn + 0.5*bert_attn_coef*bert_attn
             attn = F.dropout(attn, p=self.dropout, training=self.training)
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
@@ -422,30 +431,28 @@ class TransformerModel(nn.Module):
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
                 attn, bert_attn = 0, 0
-                if r_net < self.drop_net/2 or bert_embed is None:
-                    attn = 2 * self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                attn_coef, bert_attn_coef = 1, 1
+                if not self.training:
+                    attn_coef, bert_attn_coef = 1, 1
+                elif r_net < self.drop_net/2 or bert_embed is None:
+                    attn_coef = 2 - 1e-4
+                    bert_attn_coef = 1e-4
                 elif r_net > 1 - self.drop_net/2:
-                    bert_attn = 2 * self.bert_attentions[i](tensor, src_mask, kv=bert_embed)
-                else:
-                    attn = 2 * self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
-                    bert_attn = 2 * self.bert_attentions[i](tensor, src_mask, kv=bert_embed)
-
-                attn = 0.5*attn + 0.5*bert_attn
+                    bert_attn_coef = 2 - 1e-4
+                    attn_coef = 1e-4
+                    
+                attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache, segment_label=lang_id)
+                bert_attn = self.bert_attentions[i](tensor, src_mask, kv=bert_embed, cache=bert_cache, segment_label=lang_id)
+                    
+                attn = 0.5*attn_coef*attn + 0.5*bert_attn_coef*bert_attn
+                
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
 
             # FFN
-            if ('%i_in' % i) in self.memories:
-                tensor = tensor + self.memories['%i_in' % i](tensor)
-            else:
-                tensor = tensor + self.ffns[i](tensor)
+            tensor = tensor + self.ffns[i](tensor)
             tensor = self.layer_norm2[i](tensor)
-
-            # memory
-            if ('%i_after' % i) in self.memories:
-                tensor = tensor + self.memories['%i_after' % i](tensor)
-            # TODO: add extra layer norm here?
 
             tensor *= mask.unsqueeze(-1).to(tensor.dtype)
 
@@ -513,6 +520,7 @@ class TransformerModel(nn.Module):
 
         # cache compute states
         cache = {'slen': 0}
+        bert_cache = {'slen': 0}
 
         while cur_len < max_len:
 
@@ -527,6 +535,7 @@ class TransformerModel(nn.Module):
                 src_enc=src_enc,
                 src_len=src_len,
                 cache=cache,
+                bert_cache=bert_cache,
                 bert_embed=bert_embed
             )
             assert tensor.size() == (1, bs, self.dim), (cur_len, max_len, src_enc.size(), tensor.size(), (1, bs, self.dim))
@@ -560,7 +569,19 @@ class TransformerModel(nn.Module):
         
         return generated[:cur_len], gen_len
 
-    def generate_beam(self, src_enc, src_len, tgt_lang_id, beam_size, length_penalty, early_stopping, max_len=200, bert_embed=None):
+    def generate_beam(self,
+                    src_enc,
+                    src_len, 
+                    tgt_lang_id, 
+                    beam_size, 
+                    length_penalty, 
+                    early_stopping, 
+                    max_len=200, 
+                    bert_embed=None,
+                    cdr_generation=False,
+                    tgt_frw=None,
+                    w=None,
+                    open_end=False):
         """
         Decode a sentence given initial start.
         `x`:
@@ -587,44 +608,71 @@ class TransformerModel(nn.Module):
         n_words = self.n_words
 
         # expand to beam size the source latent representations / source lengths
+        bert_embed = bert_embed.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
         src_enc = src_enc.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
         src_len = src_len.unsqueeze(1).expand(bs, beam_size).contiguous().view(-1)
 
-        # generated sentences (batch with beam current hypotheses)
-        generated = src_len.new(max_len, bs * beam_size)  # upcoming output
-        generated.fill_(self.pad_index)                   # fill upcoming ouput with <PAD>
-        generated[0].fill_(self.eos_index)                # we use <EOS> for <BOS> everywhere
 
+        # generated sentences (batch with beam current hypotheses)
+        
+        
         # generated hypotheses
         generated_hyps = [BeamHypotheses(beam_size, max_len, length_penalty, early_stopping) for _ in range(bs)]
+        
+        use_cache = not cdr_generation
+        if cdr_generation:
+            generated = src_len.new(max_len, bs, beam_size)  # upcoming output
+            generated.fill_(self.pad_index) 
+            generated[:tgt_frw.shape[0],:,:] = tgt_frw.unsqueeze(2).expand(tgt_frw.shape[:1] + (bs, beam_size)).contiguous().clone().detach()
+            beam_w = w.new(max_len, bs)
+            if open_end:
+                beam_w.fill_(1)
+            else:
+                beam_w.fill_(0)
+            beam_w[:tgt_frw.shape[0],:] = w.clone().detach()
+            # beam_w = w.unsqueeze(2).expand(tgt_frw.shape[:1] + (bs, beam_size)).contiguous().view(tgt_frw.shape[:1] + (bs, beam_size,))
+            # frw_shape = tgt_frw.shape[:1] + (bs, beam_size,)
+        else:
+            generated = src_len.new(max_len, bs, beam_size)  # upcoming output
+            generated.fill_(self.pad_index)                   # fill upcoming ouput with <PAD>
+            generated[0].fill_(self.bos_index)                # we use <EOS> for <BOS> everywhere
+            beam_w = src_len.new(max_len, bs)
+            beam_w.fill_(1)
 
         # positions
         positions = src_len.new(max_len).long()
-        positions = torch.arange(max_len, out=positions).unsqueeze(1).expand_as(generated)
-
+        positions = torch.arange(max_len, out=positions).unsqueeze(1).expand_as(generated.view(max_len, bs * beam_size))
+        
         # language IDs
         langs = positions.clone().fill_(tgt_lang_id)
 
         # scores for each sentence in the beam
         beam_scores = src_enc.new(bs, beam_size).fill_(0)
         beam_scores[:, 1:] = -1e9
-        beam_scores = beam_scores.view(-1)
 
+        beam_search_dim = bs * beam_size
         # current position
         cur_len = 1
 
-        # cache compute states
-        cache = {'slen': 0}
+        cache, bert_cache = None, None
+        if use_cache:
+            # cache compute states
+            cache = {'slen': 0}
+            bert_cache = {'slen': 0}
 
         # done sentences
         done = [False for _ in range(bs)]
+        cdr = [0 for _ in range(bs)]
 
         while cur_len < max_len:
-
+            if  (beam_w[cur_len, :] == 0).all():
+                # update current length
+                cur_len = cur_len + 1
+                continue
             # compute word scores
             tensor = self.forward(
                 'fwd',
-                x=generated[:cur_len],
+                x=generated[:cur_len].view(-1, beam_search_dim),
                 lengths=src_len.new(bs * beam_size).fill_(cur_len),
                 positions=positions[:cur_len],
                 langs=langs[:cur_len],
@@ -632,16 +680,17 @@ class TransformerModel(nn.Module):
                 src_enc=src_enc,
                 src_len=src_len,
                 cache=cache,
+                bert_cache=bert_cache,
                 bert_embed=bert_embed
             )
-            assert tensor.size() == (1, bs * beam_size, self.dim)
             tensor = tensor.data[-1, :, :]               # (bs * beam_size, dim)
             scores = self.pred_layer.get_scores(tensor)  # (bs * beam_size, n_words)
-            scores = F.log_softmax(scores, dim=-1)       # (bs * beam_size, n_words)
+            scores = F.log_softmax(scores, dim=-1)      # (bs * beam_size, n_words)
             assert scores.size() == (bs * beam_size, n_words)
+            scores = scores.view((bs, beam_size, n_words))
 
             # select next words with scores
-            _scores = scores + beam_scores[:, None].expand_as(scores)  # (bs * beam_size, n_words)
+            _scores = scores + beam_scores[:, :,  None].expand_as(scores)  # (bs, beam_size, n_words)
             _scores = _scores.view(bs, beam_size * n_words)            # (bs, beam_size * n_words)
 
             next_scores, next_words = torch.topk(_scores, 2 * beam_size, dim=1, largest=True, sorted=True)
@@ -657,12 +706,12 @@ class TransformerModel(nn.Module):
                 # if we are done with this sentence
                 done[sent_id] = done[sent_id] or generated_hyps[sent_id].is_done(next_scores[sent_id].max().item())
                 if done[sent_id]:
-                    next_batch_beam.extend([(0, self.pad_index, 0)] * beam_size)  # pad the batch
+                    next_batch_beam.extend([(0, self.pad_index, sent_id, i) for i in range(beam_size)])  # pad the batch
                     continue
 
                 # next sentence beam content
                 next_sent_beam = []
-
+                i = 0
                 # next words for this sentence
                 for idx, value in zip(next_words[sent_id], next_scores[sent_id]):
 
@@ -671,11 +720,15 @@ class TransformerModel(nn.Module):
                     word_id = idx % n_words
 
                     # end of sentence, or next word
-                    if word_id == self.eos_index or cur_len + 1 == max_len:
-                        generated_hyps[sent_id].add(generated[:cur_len, sent_id * beam_size + beam_id].clone(), value.item())
+                    if beam_w[cur_len, sent_id] == 1 and (word_id == self.eos_index or cur_len + 1 == max_len or (beam_w[cur_len+1:, sent_id].sum() <= 1)):
+                        generated_hyps[sent_id].add(generated[:cur_len, sent_id, beam_id].clone(), value.item())
+                        i -= 1
                     else:
-                        next_sent_beam.append((value, word_id, sent_id * beam_size + beam_id))
-
+                        if beam_w[cur_len, sent_id] == 1:
+                            next_sent_beam.append((value, word_id, sent_id, beam_id))
+                        else:
+                            next_sent_beam.append((beam_scores[sent_id, i], generated[cur_len, sent_id, i], sent_id, beam_id))
+                    
                     # the beam for next step is full
                     if len(next_sent_beam) == beam_size:
                         break
@@ -683,22 +736,28 @@ class TransformerModel(nn.Module):
                 # update next beam content
                 assert len(next_sent_beam) == 0 if cur_len + 1 == max_len else beam_size
                 if len(next_sent_beam) == 0:
-                    next_sent_beam = [(0, self.pad_index, 0)] * beam_size  # pad the batch
+                    next_sent_beam = [(0, self.pad_index, sent_id, 0)] * beam_size  # pad the batch
                 next_batch_beam.extend(next_sent_beam)
                 assert len(next_batch_beam) == beam_size * (sent_id + 1)
+                i += 1
 
             # sanity check / prepare next batch
             assert len(next_batch_beam) == bs * beam_size
-            beam_scores = beam_scores.new([x[0] for x in next_batch_beam])
-            beam_words = generated.new([x[1] for x in next_batch_beam])
-            beam_idx = src_len.new([x[2] for x in next_batch_beam])
+            beam_scores = beam_scores.new([x[0] for x in next_batch_beam]).view((bs, beam_size))
+            beam_words = generated.new([x[1] for x in next_batch_beam]).view((bs, beam_size))
+            sent_id = generated.new([x[2] for x in next_batch_beam])
+            beam_idx = src_len.new([x[3] for x in next_batch_beam])
 
             # re-order batch and internal states
-            generated = generated[:, beam_idx]
+            generated = generated[:, sent_id, beam_idx].view(max_len, bs, beam_size)
             generated[cur_len] = beam_words
-            for k in cache.keys():
-                if k != 'slen':
-                    cache[k] = (cache[k][0][beam_idx], cache[k][1][beam_idx])
+            if use_cache:
+                for k in cache.keys():
+                    if k != 'slen':
+                        cache[k] = (cache[k][0][beam_idx], cache[k][1][beam_idx])
+                for k in bert_cache.keys():
+                    if k != 'slen':
+                        bert_cache[k] = (bert_cache[k][0][beam_idx], bert_cache[k][1][beam_idx])
 
             # update current length
             cur_len = cur_len + 1
@@ -707,34 +766,27 @@ class TransformerModel(nn.Module):
             if all(done):
                 break
 
-        # visualize hypotheses
-        # print([len(x) for x in generated_hyps], cur_len)
-        # globals().update( locals() );
-        # !import code; code.interact(local=vars())
-        # for ii in range(bs):
-        #     for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
-        #         print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
-        #     print("")
-
         # select the best hypotheses
-        tgt_len = src_len.new(bs)
+        tgt_len = src_len.new(bs, beam_size)
         best = []
 
         for i, hypotheses in enumerate(generated_hyps):
-            best_hyp = max(hypotheses.hyp, key=lambda x: x[0])[1]
-            tgt_len[i] = len(best_hyp) + 1  # +1 for the <EOS> symbol
+            best_hyp = [x[1] for x in sorted(hypotheses.hyp, key=lambda x: x[0])]
+            tgt_len[i] = torch.tensor([len(x[1]) + 1 for x in sorted(hypotheses.hyp, key=lambda x: x[0])])
             best.append(best_hyp)
 
         # generate target batch
-        decoded = src_len.new(tgt_len.max().item(), bs).fill_(self.pad_index)
+        decoded = src_len.new(tgt_len.max().item(), bs, beam_size).fill_(self.pad_index)
         for i, hypo in enumerate(best):
-            decoded[:tgt_len[i] - 1, i] = hypo
-            decoded[tgt_len[i] - 1, i] = self.eos_index
+            for j in range(beam_size):
+                decoded[:tgt_len[i, j] - 1, i, j] = hypo[j]
+                decoded[tgt_len[i, j] - 1, i, j] = self.eos_index
 
         # sanity check
-        assert (decoded == self.eos_index).sum() == 2 * bs
+        assert (decoded[0] == self.bos_index).sum() == bs * beam_size
+        assert (decoded == self.eos_index).sum() == bs * beam_size
 
-        return decoded, tgt_len
+        return decoded.view(-1, bs * beam_size), tgt_len.view(-1)
 
 
 class BeamHypotheses(object):

@@ -207,7 +207,7 @@ def load_para_data(params, data):
             # remove empty and too long sentences
             if splt == 'train':
                 dataset.remove_empty_sentences()
-                dataset.remove_long_sentences(params.max_len)
+                # dataset.remove_long_sentences(params.max_len)
 
             # for validation and test set, enumerate sentence per sentence
             if splt != 'train':

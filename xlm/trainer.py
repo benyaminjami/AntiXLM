@@ -23,7 +23,7 @@ from transformers import BertModel
 from .optim import get_optimizer
 from .utils import to_cuda, concat_batches, find_modules
 from .utils import parse_lambda_config, update_lambdas
-from .model.memory import HashingMemory
+# from .model.memory import HashingMemory
 from .model.transformer import TransformerFFN, get_masks
 
 
@@ -42,40 +42,22 @@ class Trainer(object):
         if self.epoch_size == -1:
             self.epoch_size = self.data
             assert self.epoch_size > 0
+        
+        self.scaler = torch.cuda.amp.GradScaler()
 
         # data iterators
         self.iterators = {}
 
-        # list memory components
-        self.memory_list = []
-        self.ffn_list = []
-        for name in self.MODEL_NAMES:
-            find_modules(getattr(self, name), f'self.{name}', HashingMemory, self.memory_list)
-            find_modules(getattr(self, name), f'self.{name}', TransformerFFN, self.ffn_list)
-        logger.info("Found %i memories." % len(self.memory_list))
-        logger.info("Found %i FFN." % len(self.ffn_list))
-
         # set parameters
         self.set_parameters()
 
-        # float16 / distributed (no AMP)
-        assert params.amp >= 1 or not params.fp16
-        assert params.amp >= 0 or params.accumulate_gradients == 1
-        if params.multi_gpu and params.amp == -1:
+        if params.multi_gpu:
             logger.info("Using nn.parallel.DistributedDataParallel ...")
             for name in self.MODEL_NAMES:
                 setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True))
 
         # set optimizers
         self.set_optimizers()
-
-        # float16 / distributed (AMP)
-        if params.amp >= 0:
-            self.init_amp()
-            if params.multi_gpu:
-                logger.info("Using apex.parallel.DistributedDataParallel ...")
-                for name in self.MODEL_NAMES:
-                    setattr(self, name, apex.parallel.DistributedDataParallel(getattr(self, name), delay_allreduce=True))
 
         # stopping criterion used for early stopping
         if params.stopping_criterion != '':
@@ -123,9 +105,9 @@ class Trainer(object):
             [('MLM-%s-%s' % (l1, l2), []) for l1, l2 in data['para'].keys()] +
             [('MLM-%s-%s' % (l2, l1), []) for l1, l2 in data['para'].keys()] +
             [('PC-%s-%s' % (l1, l2), []) for l1, l2 in params.pc_steps] +
-            [('AE-%s' % lang, []) for lang in params.ae_steps] +
-            [('MT-%s-%s' % (l1, l2), []) for l1, l2 in params.mt_steps] +
-            [('BT-%s-%s-%s' % (l1, l2, l3), []) for l1, l2, l3 in params.bt_steps]
+            [('AE-%s-loss' % lang, []) for lang in params.ae_steps] +
+            [('MT-%s-%s-loss' % (l1, l2), []) for l1, l2 in params.mt_steps] +
+            [('BT-%s-%s-%s-loss' % (l1, l2, l3), []) for l1, l2, l3 in params.bt_steps]
         )
         self.last_time = time.time()
 
@@ -146,12 +128,8 @@ class Trainer(object):
             named_params.extend([(k, p) for k, p in getattr(self, name).named_parameters() if p.requires_grad])
 
         # model (excluding memory values)
-        self.parameters['model'] = [p for k, p in named_params if not k.endswith(HashingMemory.MEM_VALUES_PARAMS)]
+        self.parameters['model'] = [p for k, p in named_params]
 
-        # memory values
-        if params.use_memory:
-            self.parameters['memory'] = [p for k, p in named_params if k.endswith(HashingMemory.MEM_VALUES_PARAMS)]
-            assert len(self.parameters['memory']) == len(params.mem_enc_positions) + len(params.mem_dec_positions)
 
         # log
         for k, v in self.parameters.items():
@@ -168,10 +146,7 @@ class Trainer(object):
         # model optimizer (excluding memory values)
         self.optimizers['model'] = get_optimizer(self.parameters['model'], params.optimizer)
 
-        # memory values optimizer
-        if params.use_memory:
-            self.optimizers['memory'] = get_optimizer(self.parameters['memory'], params.mem_values_optimizer)
-
+       
         # log
         logger.info("Optimizers: %s" % ", ".join(self.optimizers.keys()))
 
@@ -202,7 +177,8 @@ class Trainer(object):
         # check NaN
         if (loss != loss).data.any():
             logger.warning("NaN detected")
-            # exit()
+
+            exit()
 
         params = self.params
 
@@ -217,30 +193,27 @@ class Trainer(object):
             loss.backward()
             if params.clip_grad_norm > 0:
                 for name in names:
-                    # norm_check_a = (sum([p.grad.norm(p=2).item() ** 2 for p in self.parameters[name]])) ** 0.5
                     clip_grad_norm_(self.parameters[name], params.clip_grad_norm)
-                    # norm_check_b = (sum([p.grad.norm(p=2).item() ** 2 for p in self.parameters[name]])) ** 0.5
-                    # print(name, norm_check_a, norm_check_b)
+                    
             for optimizer in optimizers:
                 optimizer.step()
-
         # AMP optimization
         else:
             if self.n_iter % params.accumulate_gradients == 0:
-                with apex.amp.scale_loss(loss, optimizers) as scaled_loss:
-                    scaled_loss.backward()
+                self.scaler.scale(loss).backward()
                 if params.clip_grad_norm > 0:
-                    for name in names:
-                        # norm_check_a = (sum([p.grad.norm(p=2).item() ** 2 for p in apex.amp.master_params(self.optimizers[name])])) ** 0.5
-                        clip_grad_norm_(apex.amp.master_params(self.optimizers[name]), params.clip_grad_norm)
-                        # norm_check_b = (sum([p.grad.norm(p=2).item() ** 2 for p in apex.amp.master_params(self.optimizers[name])])) ** 0.5
-                        # print(name, norm_check_a, norm_check_b)
+                    self.scaler.unscale_(optimizers[0])
+
+                    # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+                    clip_grad_norm_(self.parameters['model'], params.clip_grad_norm)
+
                 for optimizer in optimizers:
-                    optimizer.step()
+                    self.scaler.step(optimizer)
                     optimizer.zero_grad()
+                self.scaler.update()
+                
             else:
-                with apex.amp.scale_loss(loss, optimizers, delay_unscale=True) as scaled_loss:
-                    scaled_loss.backward()
+                self.scaler.scale(loss).backward()
 
     def iter(self):
         """
@@ -255,7 +228,8 @@ class Trainer(object):
         """
         Print statistics about the training.
         """
-        
+        if self.params.global_rank % self.params.n_gpu_per_node != 0:
+            return
         if self.n_total_iter % 5 != 0:
             return
 
@@ -593,8 +567,8 @@ class Trainer(object):
         """
         if not self.params.is_master:
             return
-        if self.params.save_periodic > 0 and self.epoch % self.params.save_periodic == 0:
-            self.save_checkpoint('periodic-%i' % self.epoch, include_optimizers=False)
+        if self.params.save_periodic > 0 and self.n_sentences % self.params.save_periodic < 513:
+            self.save_checkpoint('checkpoint', include_optimizers=True)
 
     def save_best_model(self, scores):
         """
@@ -617,24 +591,24 @@ class Trainer(object):
         End the epoch.
         """
         # stop if the stopping criterion has not improved after a certain number of epochs
-        if self.stopping_criterion is not None and (self.params.is_master or not self.stopping_criterion[0].endswith('_mt_bleu')):
-            metric, biggest = self.stopping_criterion
-            assert metric in scores, metric
-            factor = 1 if biggest else -1
-            if factor * scores[metric] > factor * self.best_stopping_criterion:
-                self.best_stopping_criterion = scores[metric]
-                logger.info("New best validation score: %f" % self.best_stopping_criterion)
-                self.decrease_counts = 0
-            else:
-                logger.info("Not a better validation score (%i / %i)."
-                            % (self.decrease_counts, self.decrease_counts_max))
-                self.decrease_counts += 1
-            if self.decrease_counts > self.decrease_counts_max:
-                logger.info("Stopping criterion has been below its best value for more "
-                            "than %i epochs. Ending the experiment..." % self.decrease_counts_max)
-                if self.params.multi_gpu and 'SLURM_JOB_ID' in os.environ:
-                    os.system('scancel ' + os.environ['SLURM_JOB_ID'])
-                exit()
+        # if self.stopping_criterion is not None and (self.params.is_master or not self.stopping_criterion[0].endswith('_mt_bleu')):
+        #     metric, biggest = self.stopping_criterion
+        #     # assert metric in scores, metric
+        #     factor = 1 if biggest else -1
+        #     if factor * scores[metric] > factor * self.best_stopping_criterion:
+        #         self.best_stopping_criterion = scores[metric]
+        #         logger.info("New best validation score: %f" % self.best_stopping_criterion)
+        #         self.decrease_counts = 0
+        #     else:
+        #         logger.info("Not a better validation score (%i / %i)."
+        #                     % (self.decrease_counts, self.decrease_counts_max))
+        #         self.decrease_counts += 1
+        #     if self.decrease_counts > self.decrease_counts_max:
+        #         logger.info("Stopping criterion has been below its best value for more "
+        #                     "than %i epochs. Ending the experiment..." % self.decrease_counts_max)
+        #         if self.params.multi_gpu and 'SLURM_JOB_ID' in os.environ:
+        #             os.system('scancel ' + os.environ['SLURM_JOB_ID'])
+        #         exit()
         self.save_checkpoint('checkpoint', include_optimizers=True)
         self.epoch += 1
 
@@ -866,7 +840,7 @@ class EncDecTrainer(Trainer):
             (x2, len2, w2) = (x1, len1, w1)
             (x1, len1) = self.add_noise(x1, len1)
         else:
-            (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
+            (x1, len1, w1), (x2, len2, w2) = self.get_batch('mt', lang1, lang2)
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
 
@@ -877,28 +851,31 @@ class EncDecTrainer(Trainer):
         w2 = w2[1:].masked_select(pred_mask)
         
         token_type_ids = torch.zeros_like(x1)
-        # assert len(y) == (len2 - 1).sum().item()
         
         # cuda
         # TODO: GPU
         if self.params.cuda:
             x1, len1, langs1, x2, len2, langs2, y, w2, token_type_ids = to_cuda(x1, len1, langs1, x2, len2, langs2, y, w2, token_type_ids)
 
-        bert_embed = None
-        if self.fused_bert:
-            with torch.no_grad():
-                bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
-        # encode source sentence
-        enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
-        enc1 = enc1.transpose(0, 1)
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
+            bert_embed = None
+            if self.fused_bert:
+                with torch.no_grad():
+                    bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
+            # encode source sentence
+            enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
+            enc1 = enc1.transpose(0, 1)
+            
+            # decode target sentence
+            dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
+            
+            # loss
+            _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False, weights=w2)
+            self.stats[('AE-%s-loss' % lang1) if lang1 == lang2 else ('MT-%s-%s-loss' % (lang1, lang2))].append(loss.item())
+            loss = lambda_coeff * loss
+        
 
-        # decode target sentence
-        dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
-
-        # loss
-        _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False, weights=w2)
-        self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss.item())
-        loss = lambda_coeff * loss
 
         # optimize
         self.optimize(loss)
@@ -934,55 +911,58 @@ class EncDecTrainer(Trainer):
         if self.params.cuda:
             x1, len1, langs1, w1, token_type_ids = to_cuda(x1, len1, langs1, w1, token_type_ids)
 
-        # generate a translation
-        with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
+                # generate a translation
+            with torch.no_grad():
 
-            # evaluation mode
-            self.encoder.eval()
-            self.decoder.eval()
+                # evaluation mode
+                self.encoder.eval()
+                self.decoder.eval()
 
 
-            bert_embed = None
-            if self.fused_bert:
-                bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
+                bert_embed = None
+                if self.fused_bert:
+                    bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
 
-            # encode source sentence and translate it
-            enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
-            enc1 = enc1.transpose(0, 1)
+                # encode source sentence and translate it
+                enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
+                enc1 = enc1.transpose(0, 1)
+                
+                x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed)
+                langs2 = x2.clone().fill_(lang2_id)
+
+                bert_embed = None
+                if self.fused_bert:
+                    token_type_ids = torch.zeros_like(x2)
+                    if self.params.cuda:
+                        token_type_ids, = to_cuda(token_type_ids)
+                    bert_embed = self.bert(input_ids=x2.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x2.size()[0], len2, False)[0]).last_hidden_state
+
+                # free CUDA memory
+                del enc1
+
+                # training mode
+                self.encoder.train()
+                self.decoder.train()
+            # encode generate sentence
+
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
+            enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False, bert_embed=bert_embed)
+            enc2 = enc2.transpose(0, 1)
+
+            # words to predict
+            alen = torch.arange(len1.max(), dtype=torch.long, device=len1.device)
+            pred_mask = (alen[:, None] < len1[None] - 1)[:-1] * (w1[1:] > 0)   # do not predict anything given the last target word
+            y = x1[1:].masked_select(pred_mask)
+            w1 = w1[1:].masked_select(pred_mask)
             
-            x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed)
-            langs2 = x2.clone().fill_(lang2_id)
+            # decode original sentence
+            dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2, bert_embed=bert_embed)
 
-            bert_embed = None
-            if self.fused_bert:
-                token_type_ids = torch.zeros_like(x2)
-                if self.params.cuda:
-                    token_type_ids, = to_cuda(token_type_ids)
-                bert_embed = self.bert(input_ids=x2.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x2.size()[0], len2, False)[0]).last_hidden_state
-
-            # free CUDA memory
-            del enc1
-
-            # training mode
-            self.encoder.train()
-            self.decoder.train()
-        # encode generate sentence
-        enc2 = self.encoder('fwd', x=x2, lengths=len2, langs=langs2, causal=False, bert_embed=bert_embed)
-        enc2 = enc2.transpose(0, 1)
-
-        # words to predict
-        alen = torch.arange(len1.max(), dtype=torch.long, device=len1.device)
-        pred_mask = (alen[:, None] < len1[None] - 1)[:-1] * (w1[1:] > 0)   # do not predict anything given the last target word
-        y = x1[1:].masked_select(pred_mask)
-        w1 = w1[1:].masked_select(pred_mask)
-        
-        # decode original sentence
-        dec3 = self.decoder('fwd', x=x1, lengths=len1, langs=langs1, causal=True, src_enc=enc2, src_len=len2, bert_embed=bert_embed)
-
-        # loss
-        _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y, get_scores=False, weights=w1)
-        self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
-        loss = lambda_coeff * loss
+                # loss
+            _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y, get_scores=False, weights=w1)
+            self.stats[('BT-%s-%s-%s-loss' % (lang1, lang2, lang3))].append(loss.item())
+            loss = lambda_coeff * loss
         # optimize
         self.optimize(loss)
 

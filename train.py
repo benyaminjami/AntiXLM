@@ -10,12 +10,13 @@ import random
 import wandb
 import argparse
 import xlm.utils as utils
+import sys
 
 from xlm.slurm import init_signal_handler, init_distributed_mode
 from xlm.data.loader import check_data_params, load_data
 from xlm.utils import bool_flag, initialize_exp, set_sampling_probs, shuf_order
 from xlm.model import check_model_params, build_model
-from xlm.model.memory import HashingMemory
+# from xlm.model.memory import HashingMemory
 from xlm.trainer import SingleTrainer, EncDecTrainer
 from xlm.evaluation.evaluator import SingleEvaluator, EncDecEvaluator
 
@@ -34,15 +35,15 @@ def get_parser():
                         help="Experiment dump path")
     parser.add_argument("--exp_name", type=str, default="test",
                         help="Experiment name")
-    parser.add_argument("--save_periodic", type=int, default=0,
+    parser.add_argument("--save_periodic", type=int, default=10000,
                         help="Save the model periodically (0 to disable)")
     parser.add_argument("--exp_id", type=str, default="0",
                         help="Experiment ID")
 
     # float16 / AMP API
-    parser.add_argument("--fp16", type=bool_flag, default=False,
+    parser.add_argument("--fp16", type=bool_flag, default=True,
                         help="Run model with float16")
-    parser.add_argument("--amp", type=int, default=-1,
+    parser.add_argument("--amp", type=int, default=1,
                         help="Use AMP wrapper for float16 / distributed / gradient accumulation. Level of optimization. -1 to disable.")
 
     # only use an encoder (use a specific decoder for machine translation)
@@ -68,20 +69,20 @@ def get_parser():
                         help="Share input and output embeddings")
     parser.add_argument("--sinusoidal_embeddings", type=bool_flag, default=False,
                         help="Use sinusoidal embeddings")
-    parser.add_argument("--use_lang_emb", type=bool_flag, default=True,
-                        help="Use language embedding")
+    parser.add_argument("--lang_emb", type=str, default="layer", choices=["emb", "layer"],
+                        help="how to distinguish langs")
     parser.add_argument("--fused_bert", type=bool_flag, default=True,
                         help="INCORPORATING BERT INTO NEURAL MACHINE TRANSLATION")
 
     # memory parameters
     parser.add_argument("--use_memory", type=bool_flag, default=False,
                         help="Use an external memory")
-    if parser.parse_known_args()[0].use_memory:
-        HashingMemory.register_args(parser)
-        parser.add_argument("--mem_enc_positions", type=str, default="",
-                            help="Memory positions in the encoder ('4' for inside layer 4, '7,10+' for inside layer 7 and after layer 10)")
-        parser.add_argument("--mem_dec_positions", type=str, default="",
-                            help="Memory positions in the decoder. Same syntax as `mem_enc_positions`.")
+    # if parser.parse_known_args()[0].use_memory:
+    #     HashingMemory.register_args(parser)
+    #     parser.add_argument("--mem_enc_positions", type=str, default="",
+    #                         help="Memory positions in the encoder ('4' for inside layer 4, '7,10+' for inside layer 7 and after layer 10)")
+    #     parser.add_argument("--mem_dec_positions", type=str, default="",
+    #                         help="Memory positions in the decoder. Same syntax as `mem_enc_positions`.")
 
     # adaptive softmax
     parser.add_argument("--asm", type=bool_flag, default=False,
@@ -123,9 +124,9 @@ def get_parser():
                         help="Minimum vocabulary count")
     parser.add_argument("--lg_sampling_factor", type=float, default=-1,
                         help="Language sampling factor")
-    parser.add_argument("--skip_fw", type=bool_flag, default=True,
+    parser.add_argument("--skip_fw", type=bool_flag, default=False,
                         help="Training on Frameworks or not")
-    parser.add_argument("--cdr_weight", type=int, default=2, 
+    parser.add_argument("--cdr_weight", type=int, default=3, 
                         help="Weight that the cdr losses will be multipled with")
 
     # batch parameters
@@ -181,9 +182,11 @@ def get_parser():
                         help="Masked prediction steps (MLM / TLM)")
     parser.add_argument("--mt_steps", type=str, default="",
                         help="Machine translation steps")
-    parser.add_argument("--mt_steps_ratio", type=int, default=25,
+    parser.add_argument("--mt_steps_ratio", type=int, default=0,
                         help="Machine translation steps ratio")
-    parser.add_argument("--ae_steps", type=str, default="at,ag",
+    parser.add_argument("--mt_steps_warmup", type=int, default=-1,
+                        help="Machine translation number of warmup steps")
+    parser.add_argument("--ae_steps", type=str, default="ab,ag",
                         help="Denoising auto-encoder steps")
     parser.add_argument("--bt_steps", type=str, default="at-ag-at,ag-at-ag",
                         help="Back-translation steps")
@@ -209,6 +212,8 @@ def get_parser():
     # evaluation
     parser.add_argument("--eval_bleu", type=bool_flag, default=False,
                         help="Evaluate BLEU score during MT training")
+    parser.add_argument("--open", type=bool_flag, default=True,
+                        help="Generate CDR with unspecified length")                        
     parser.add_argument("--eval_only", type=bool_flag, default=False,
                         help="Only run evaluations")
 
@@ -278,32 +283,28 @@ def main(params):
 
         while trainer.n_sentences < trainer.epoch_size:
 
-            # CLM steps
-            # for lang1, lang2 in shuf_order(params.clm_steps, params):
-            #     trainer.clm_step(lang1, lang2, params.lambda_clm)
-
             # # MLM steps (also includes TLM if lang2 is not None)
             # for lang1, lang2 in shuf_order(params.mlm_steps, params):
             #     trainer.mlm_step(lang1, lang2, params.lambda_mlm)
 
-            # # parallel classification steps
-            # for lang1, lang2 in shuf_order(params.pc_steps, params):
-            #     trainer.pc_step(lang1, lang2, params.lambda_pc)
-
             # denoising auto-encoder steps
-            for lang in shuf_order(params.ae_steps):
-                trainer.mt_step(lang, lang, params.lambda_ae)
-
-            if trainer.n_iter % params.mt_steps_ratio == 0:
-                # machine translation steps
-                for lang1, lang2 in shuf_order(params.mt_steps, params):
-                    trainer.mt_step(lang1, lang2, params.lambda_mt)
+            if trainer.n_total_iter > params.mt_steps_warmup:
+                for lang in shuf_order(params.ae_steps):
+                    trainer.mt_step(lang, lang, params.lambda_ae)
+            
+            if params.mt_steps_ratio != 0:
+                if trainer.n_total_iter % params.mt_steps_ratio == 0 or trainer.n_total_iter < params.mt_steps_warmup:
+                    # machine translation steps
+                    for lang1, lang2 in shuf_order(params.mt_steps, params):
+                        trainer.mt_step(lang1, lang2, params.lambda_mt)
 
             # back-translation steps
-            for lang1, lang2, lang3 in shuf_order(params.bt_steps):
-                trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
+            if trainer.n_total_iter > params.mt_steps_warmup:
+                for lang1, lang2, lang3 in shuf_order(params.bt_steps):
+                    trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
 
             trainer.iter()
+            trainer.save_periodic()
             
 
         logger.info("============ End of epoch %i ============" % trainer.epoch)
@@ -313,14 +314,16 @@ def main(params):
         scores = evaluator.run_all_evals(trainer)
 
         # print / JSON log
-        for k, v in scores.items():
-            logger.info("%s -> %.6f" % (k, v))
-        for k in scores:
-            utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
-            wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
+        if params.global_rank % params.n_gpu_per_node == 0:
+                
+            for k, v in scores.items():
+                logger.info("%s -> %.6f" % (k, v))
+            for k in scores:
+                utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
+                wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
 
-        if params.is_master:
-            logger.info("__log__:%s" % json.dumps(scores))
+            if params.is_master:
+                logger.info("__log__:%s" % json.dumps(scores))
 
         # end of epoch
         trainer.save_best_model(scores)
@@ -329,7 +332,6 @@ def main(params):
 
 
 if __name__ == '__main__':
-
     # generate parser / parse parameters
     parser = get_parser()
     params = parser.parse_args()

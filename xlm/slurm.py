@@ -55,8 +55,9 @@ def init_distributed_mode(params):
         - world_size
     """
     params.is_slurm_job = 'SLURM_JOB_ID' in os.environ and not params.debug_slurm
-    print("SLURM job: %s" % str(params.is_slurm_job))
 
+    logger.info("SLURM job: %s" % str(params.is_slurm_job))
+    
     
     # SLURM job
     if params.is_slurm_job:
@@ -73,6 +74,7 @@ def init_distributed_mode(params):
         PREFIX = "%i - " % int(os.environ['SLURM_PROCID'])
         for name in SLURM_VARIABLES:
             value = os.environ.get(name, None)
+            logger.info(PREFIX + "%s: %s" % (name, str(value)))
             print(PREFIX + "%s: %s" % (name, str(value)))
 
         # # job ID
@@ -83,25 +85,30 @@ def init_distributed_mode(params):
         params.node_id = int(os.environ['SLURM_NODEID'])
 
         # local rank on the current node / global rank
-        params.local_rank = int(os.environ['SLURM_LOCALID'])
+        # params.local_rank = int(os.environ['SLURM_LOCALID'])
+        params.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        # params.local_rank = int(os.environ['RANK'])
         params.global_rank = int(os.environ['SLURM_PROCID'])
+        # params.global_rank = int(os.environ['RANK'])
 
         # number of processes / GPUs per node
-        params.world_size = int(os.environ['SLURM_NTASKS'])
+        params.world_size = int(os.environ.get('WORLD_SIZE', 1))
         params.n_gpu_per_node = params.world_size // params.n_nodes
 
         # define master address and master port
         hostnames = subprocess.check_output(['/opt/slurm/bin/scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
         params.master_addr = hostnames.split()[0].decode('utf-8')
-        assert 10001 <= params.master_port <= 20000 or params.world_size == 1
-        print(PREFIX + "Master address: %s" % params.master_addr)
-        print(PREFIX + "Master port   : %i" % params.master_port)
+        logger.info(PREFIX + "Master address: %s" % params.master_addr)
+        logger.info(PREFIX + "Master port   : %i" % params.master_port)
 
         # set environment variables for 'env://'
-        os.environ['MASTER_ADDR'] = params.master_addr
-        os.environ['MASTER_PORT'] = str(params.master_port)
-        os.environ['WORLD_SIZE'] = str(params.world_size)
-        os.environ['RANK'] = str(params.global_rank)
+        # os.environ['MASTER_ADDR'] = params.master_addr
+        # os.environ['MASTER_PORT'] = str(params.master_port)
+        # os.environ['WORLD_SIZE'] = str(params.world_size)
+        # os.environ['RANK'] = str(params.global_rank)
+        params.master_addr = os.environ.get('MASTER_ADDR', params.master_addr)
+        params.master_port = int(os.environ.get('MASTER_PORT', params.master_port))
+        params.global_rank = int(os.environ.get('RANK', 0))
 
     # multi-GPU job (local or multi-node) - jobs started with torch.distributed.launch
     elif params.local_rank != -1:
@@ -128,12 +135,6 @@ def init_distributed_mode(params):
         params.world_size = 1
         params.n_gpu_per_node = 1
 
-    # sanity checks
-    assert params.n_nodes >= 1
-    assert 0 <= params.node_id < params.n_nodes
-    assert 0 <= params.local_rank <= params.global_rank < params.world_size
-    assert params.world_size == params.n_nodes * params.n_gpu_per_node
-
     # define whether this is the master process / if we are in distributed mode
     params.is_master = params.node_id == 0 and params.local_rank == 0
     params.multi_node = params.n_nodes > 1
@@ -141,8 +142,24 @@ def init_distributed_mode(params):
     
     os.environ["NCCL_DEBUG"] = "INFO"
 
+    if params.cuda:
+        torch.cuda.set_device(params.local_rank)
     # summary
     PREFIX = "%i - " % params.global_rank
+    logger.info(PREFIX + "Number of nodes: %i" % params.n_nodes)
+    logger.info(PREFIX + "Node ID        : %i" % params.node_id)
+    logger.info(PREFIX + "Local rank     : %i" % params.local_rank)
+    logger.info(PREFIX + "Local rank     : %i" % torch.cuda.current_device())
+    logger.info(PREFIX + "Global rank    : %i" % params.global_rank)
+    logger.info(PREFIX + "World size     : %i" % params.world_size)
+    logger.info(PREFIX + "GPUs per node  : %i" % params.n_gpu_per_node)
+    logger.info(PREFIX + "GPUs per node-T: %i" % torch.cuda.device_count())
+    logger.info(PREFIX + "Master         : %s" % str(params.is_master))
+    logger.info(PREFIX + "Multi-node     : %s" % str(params.multi_node))
+    logger.info(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
+    logger.info(PREFIX + "Hostname       : %s" % socket.gethostname())
+    logger.info(PREFIX + "GPU            : %s" % torch.cuda.device(torch.cuda.current_device()))
+    
     print(PREFIX + "Number of nodes: %i" % params.n_nodes)
     print(PREFIX + "Node ID        : %i" % params.node_id)
     print(PREFIX + "Local rank     : %i" % params.local_rank)
@@ -156,11 +173,15 @@ def init_distributed_mode(params):
     print(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
     print(PREFIX + "Hostname       : %s" % socket.gethostname())
     print(PREFIX + "GPU            : %s" % torch.cuda.device(torch.cuda.current_device()))
-    params.local_rank = torch.cuda.current_device()
     # set GPU device
-    if params.cuda:
-        torch.cuda.set_device(torch.cuda.current_device())
+    
 
+    # sanity checks
+    assert params.n_nodes >= 1
+    assert 0 <= params.node_id < params.n_nodes
+    # assert 0 <= params.local_rank <= params.global_rank < params.world_size
+    assert params.world_size == params.n_nodes * params.n_gpu_per_node
+    
     # initialize multi-GPU
     if params.multi_gpu:
 
@@ -171,11 +192,9 @@ def init_distributed_mode(params):
         # WORLD_SIZE - required; can be set either here, or in a call to init function
         # RANK - required; can be set either here, or in a call to init function
 
-        print("Initializing PyTorch distributed ...")
+        logger.info("Initializing PyTorch distributed ...")
         torch.distributed.init_process_group(
-            init_method='env://',
-            backend='nccl',
-            world_size=params.world_size,
-            rank=params.global_rank
+            # init_method='env://',
+            backend='nccl'
         )
-        print(PREFIX + "Initilized   ")
+        logger.info(PREFIX + "Initilized   ")

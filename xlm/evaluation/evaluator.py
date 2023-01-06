@@ -7,13 +7,15 @@
 
 from logging import getLogger
 import os
+import Bio
 import subprocess
+from Bio.Align import substitution_matrices
 from collections import OrderedDict
 import numpy as np
 import torch
 from ..model.transformer import get_masks
 from ..utils import to_cuda, restore_segmentation, concat_batches
-from ..model.memory import HashingMemory
+# from ..model.memory import HashingMemory
 
 
 BLEU_SCRIPT_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'multi-bleu.perl')
@@ -43,44 +45,6 @@ def tops(x):
     return top50, top90, top99
 
 
-def eval_memory_usage(scores, name, mem_att, mem_size):
-    """
-    Evaluate memory usage (HashingMemory / FFN).
-    """
-    # memory slot scores
-    assert mem_size > 0
-    mem_scores_w = np.zeros(mem_size, dtype=np.float32)  # weighted scores
-    mem_scores_u = np.zeros(mem_size, dtype=np.float32)  # unweighted scores
-
-    # sum each slot usage
-    for indices, weights in mem_att:
-        np.add.at(mem_scores_w, indices, weights)
-        np.add.at(mem_scores_u, indices, 1)
-
-    # compute the KL distance to the uniform distribution
-    mem_scores_w = mem_scores_w / mem_scores_w.sum()
-    mem_scores_u = mem_scores_u / mem_scores_u.sum()
-
-    # store stats
-    scores['%s_mem_used' % name] = float(100 * (mem_scores_w != 0).sum() / len(mem_scores_w))
-
-    scores['%s_mem_kl_w' % name] = float(kl_score(mem_scores_w))
-    scores['%s_mem_kl_u' % name] = float(kl_score(mem_scores_u))
-
-    scores['%s_mem_gini_w' % name] = float(gini_score(mem_scores_w))
-    scores['%s_mem_gini_u' % name] = float(gini_score(mem_scores_u))
-
-    top50, top90, top99 = tops(mem_scores_w)
-    scores['%s_mem_top50_w' % name] = float(top50)
-    scores['%s_mem_top90_w' % name] = float(top90)
-    scores['%s_mem_top99_w' % name] = float(top99)
-
-    top50, top90, top99 = tops(mem_scores_u)
-    scores['%s_mem_top50_u' % name] = float(top50)
-    scores['%s_mem_top90_u' % name] = float(top90)
-    scores['%s_mem_top99_u' % name] = float(top99)
-
-
 class Evaluator(object):
 
     def __init__(self, trainer, data, params):
@@ -91,11 +55,27 @@ class Evaluator(object):
         self.data = data
         self.dico = data['dico']
         self.params = params
-        self.memory_list = trainer.memory_list
+        
 
         # create directory to store hypotheses, and reference files for BLEU evaluation
+        params.hyp_path = os.path.join(params.dump_path, 'hypotheses')
+        params = self.params
+        params.ref_paths = {}
+
+        for (lang1, lang2), v in self.data['para'].items():
+
+            assert lang1 < lang2
+
+            for data_set in ['valid', 'test']:
+
+                # define data paths
+                lang1_path = os.path.join(params.hyp_path, 'ref.{0}-{1}.{2}.txt'.format(lang2, lang1, data_set))
+                lang2_path = os.path.join(params.hyp_path, 'ref.{0}-{1}.{2}.txt'.format(lang1, lang2, data_set))
+
+                # store data paths
+                params.ref_paths[(lang2, lang1, data_set)] = lang1_path
+                params.ref_paths[(lang1, lang2, data_set)] = lang2_path
         if self.params.is_master:
-            params.hyp_path = os.path.join(params.dump_path, 'hypotheses')
             subprocess.Popen('mkdir -p %s' % params.hyp_path, shell=True).wait()
             self.create_reference_files()
 
@@ -169,7 +149,7 @@ class Evaluator(object):
                 lang2_txt = []
 
                 # convert to text
-                for (sent1, len1), (sent2, len2) in self.get_iterator(data_set, lang1, lang2):
+                for (sent1, len1, w1), (sent2, len2, w2) in self.get_iterator(data_set, lang1, lang2):
                     lang1_txt.extend(convert_to_text(sent1, len1, self.dico, params))
                     lang2_txt.extend(convert_to_text(sent2, len2, self.dico, params))
 
@@ -222,182 +202,48 @@ class Evaluator(object):
         """
         params = self.params
         scores = OrderedDict({'epoch': trainer.epoch})
-
+        data_set_dictionary = {
+            "ag-ab.test":0,
+            "ab-ag.test":1,
+            "ag-ab.valid":2,
+            "ab-ag.valid":3,
+            "ag-ab.valid-cdr":4, 
+            "ag-ab.valid-cdr_open":5, 
+            "ag-ab.test-cdr":6, 
+            "ag-ab.test-cdr_open":7 
+        }
+        try:
+            os.mkdir(os.path.join(params.hyp_path, str(scores['epoch'])))
+        except:
+            print('Folder exists')
         with torch.no_grad():
 
             for data_set in ['valid', 'test']:
 
-                # causal prediction task (evaluate perplexity and accuracy)
-                for lang1, lang2 in params.clm_steps:
-                    self.evaluate_clm(scores, data_set, lang1, lang2)
-
-                # prediction task (evaluate perplexity and accuracy)
-                for lang1, lang2 in params.mlm_steps:
-                    self.evaluate_mlm(scores, data_set, lang1, lang2)
-
                 for lang in params.ae_steps:
-                    eval_bleu = params.eval_bleu and params.is_master
-                    self.evaluate_mt(scores, data_set, lang, lang, eval_bleu)
+                    self.evaluate_mt(scores, data_set, lang, lang, False)
 
                 # machine translation task (evaluate perplexity and accuracy)
-                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):
-                    eval_bleu = params.eval_bleu and params.is_master
-                    self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
+                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
+                    eval_bleu = params.eval_bleu and \
+                        data_set_dictionary["{0}-{1}.{2}".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
+                    if eval_bleu:
+                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
 
-                # report average metrics per language
-                _clm_mono = [l1 for (l1, l2) in params.clm_steps if l2 is None]
-                if len(_clm_mono) > 0:
-                    scores['%s_clm_ppl' % data_set] = np.mean([scores['%s_%s_clm_ppl' % (data_set, lang)] for lang in _clm_mono])
-                    scores['%s_clm_acc' % data_set] = np.mean([scores['%s_%s_clm_acc' % (data_set, lang)] for lang in _clm_mono])
-                _mlm_mono = [l1 for (l1, l2) in params.mlm_steps if l2 is None]
-                if len(_mlm_mono) > 0:
-                    scores['%s_mlm_ppl' % data_set] = np.mean([scores['%s_%s_mlm_ppl' % (data_set, lang)] for lang in _mlm_mono])
-                    scores['%s_mlm_acc' % data_set] = np.mean([scores['%s_%s_mlm_acc' % (data_set, lang)] for lang in _mlm_mono])
+                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
+                    eval_bleu = params.eval_bleu and \
+                        data_set_dictionary["{0}-{1}.{2}-cdr".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
+                    if eval_bleu:
+                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu, cdr=True)
+                
+                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
+                    eval_bleu = params.eval_bleu and params.open and \
+                        data_set_dictionary["{0}-{1}.{2}-cdr_open".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
+                    if eval_bleu:
+                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
+                    
 
         return scores
-
-    def evaluate_clm(self, scores, data_set, lang1, lang2):
-        """
-        Evaluate perplexity and next word prediction accuracy.
-        """
-        params = self.params
-        assert data_set in ['valid', 'test']
-        assert lang1 in params.langs
-        assert lang2 in params.langs or lang2 is None
-
-        model = self.model if params.encoder_only else self.decoder
-        model.eval()
-        model = model.module if params.multi_gpu else model
-
-        lang1_id = params.lang2id[lang1]
-        lang2_id = params.lang2id[lang2] if lang2 is not None else None
-        l1l2 = lang1 if lang2 is None else f"{lang1}-{lang2}"
-
-        n_words = 0
-        xe_loss = 0
-        n_valid = 0
-
-        # only save states / evaluate usage on the validation set
-        eval_memory = params.use_memory and data_set == 'valid' and self.params.is_master
-        HashingMemory.EVAL_MEMORY = eval_memory
-        if eval_memory:
-            all_mem_att = {k: [] for k, _ in self.memory_list}
-
-        for batch in self.get_iterator(data_set, lang1, lang2, stream=(lang2 is None)):
-
-            # batch
-            if lang2 is None:
-                x, lengths = batch
-                positions = None
-                langs = x.clone().fill_(lang1_id) if params.n_langs > 1 else None
-            else:
-                (sent1, len1), (sent2, len2) = batch
-                x, lengths, positions, langs = concat_batches(sent1, len1, lang1_id, sent2, len2, lang2_id, params.pad_index, params.eos_index, reset_positions=True)
-
-            # words to predict
-            alen = torch.arange(lengths.max(), dtype=torch.long, device=lengths.device)
-            pred_mask = alen[:, None] < lengths[None] - 1
-            y = x[1:].masked_select(pred_mask[:-1])
-            assert pred_mask.sum().item() == y.size(0)
-
-            # cuda
-            x, lengths, positions, langs, pred_mask, y = to_cuda(x, lengths, positions, langs, pred_mask, y)
-
-            # forward / loss
-            tensor = model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=True)
-            word_scores, loss = model('predict', tensor=tensor, pred_mask=pred_mask, y=y, get_scores=True)
-
-            # update stats
-            n_words += y.size(0)
-            xe_loss += loss.item() * len(y)
-            n_valid += (word_scores.max(1)[1] == y).sum().item()
-            if eval_memory:
-                for k, v in self.memory_list:
-                    all_mem_att[k].append((v.last_indices, v.last_scores))
-
-        # log
-        logger.info("Found %i words in %s. %i were predicted correctly." % (n_words, data_set, n_valid))
-
-        # compute perplexity and prediction accuracy
-        ppl_name = '%s_%s_clm_ppl' % (data_set, l1l2)
-        acc_name = '%s_%s_clm_acc' % (data_set, l1l2)
-        scores[ppl_name] = np.exp(xe_loss / n_words)
-        scores[acc_name] = 100. * n_valid / n_words
-
-        # compute memory usage
-        if eval_memory:
-            for mem_name, mem_att in all_mem_att.items():
-                eval_memory_usage(scores, '%s_%s_%s' % (data_set, l1l2, mem_name), mem_att, params.mem_size)
-
-    def evaluate_mlm(self, scores, data_set, lang1, lang2):
-        """
-        Evaluate perplexity and next word prediction accuracy.
-        """
-        params = self.params
-        assert data_set in ['valid', 'test']
-        assert lang1 in params.langs
-        assert lang2 in params.langs or lang2 is None
-
-        model = self.model if params.encoder_only else self.encoder
-        model.eval()
-        model = model.module if params.multi_gpu else model
-
-        rng = np.random.RandomState(0)
-
-        lang1_id = params.lang2id[lang1]
-        lang2_id = params.lang2id[lang2] if lang2 is not None else None
-        l1l2 = lang1 if lang2 is None else f"{lang1}_{lang2}"
-
-        n_words = 0
-        xe_loss = 0
-        n_valid = 0
-
-        # only save states / evaluate usage on the validation set
-        eval_memory = params.use_memory and data_set == 'valid' and self.params.is_master
-        HashingMemory.EVAL_MEMORY = eval_memory
-        if eval_memory:
-            all_mem_att = {k: [] for k, _ in self.memory_list}
-
-        for batch in self.get_iterator(data_set, lang1, lang2, stream=(lang2 is None)):
-
-            # batch
-            if lang2 is None:
-                x, lengths = batch
-                positions = None
-                langs = x.clone().fill_(lang1_id) if params.n_langs > 1 else None
-            else:
-                (sent1, len1), (sent2, len2) = batch
-                x, lengths, positions, langs = concat_batches(sent1, len1, lang1_id, sent2, len2, lang2_id, params.pad_index, params.eos_index, reset_positions=True)
-
-            # words to predict
-            x, y, pred_mask = self.mask_out(x, lengths, rng)
-
-            # cuda
-            x, y, pred_mask, lengths, positions, langs = to_cuda(x, y, pred_mask, lengths, positions, langs)
-
-            # forward / loss
-            tensor = model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)
-            word_scores, loss = model('predict', tensor=tensor, pred_mask=pred_mask, y=y, get_scores=True)
-
-            # update stats
-            n_words += len(y)
-            xe_loss += loss.item() * len(y)
-            n_valid += (word_scores.max(1)[1] == y).sum().item()
-            if eval_memory:
-                for k, v in self.memory_list:
-                    all_mem_att[k].append((v.last_indices, v.last_scores))
-
-        # compute perplexity and prediction accuracy
-        ppl_name = '%s_%s_mlm_ppl' % (data_set, l1l2)
-        acc_name = '%s_%s_mlm_acc' % (data_set, l1l2)
-        scores[ppl_name] = np.exp(xe_loss / n_words) if n_words > 0 else 1e9
-        scores[acc_name] = 100. * n_valid / n_words if n_words > 0 else 0.
-
-        # compute memory usage
-        if eval_memory:
-            for mem_name, mem_att in all_mem_att.items():
-                eval_memory_usage(scores, '%s_%s_%s' % (data_set, l1l2, mem_name), mem_att, params.mem_size)
-
 
 class SingleEvaluator(Evaluator):
 
@@ -423,6 +269,9 @@ class EncDecEvaluator(Evaluator):
         self.fused_bert = params.fused_bert
         if self.fused_bert:
             self.bert = bert
+        self.aligner = Bio.Align.PairwiseAligner()
+        self.aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
+
 
     def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
         """
@@ -433,6 +282,7 @@ class EncDecEvaluator(Evaluator):
         assert lang1 in params.langs
         assert lang2 in params.langs
 
+
         self.encoder.eval()
         self.decoder.eval()
         encoder = self.encoder.module if params.multi_gpu else self.encoder
@@ -442,25 +292,26 @@ class EncDecEvaluator(Evaluator):
         lang1_id = params.lang2id[lang1]
         lang2_id = params.lang2id[lang2]
 
+        n_sentences = 0
         n_words = 0
         xe_loss = 0
         n_valid = 0
-
-        # only save states / evaluate usage on the validation set
-        eval_memory = params.use_memory and data_set == 'valid' and self.params.is_master
-        HashingMemory.EVAL_MEMORY = eval_memory
-        if eval_memory:
-            all_mem_att = {k: [] for k, _ in self.memory_list}
+        generate_identity, generate_cdr_identity = 0, 0
+        cdr_generate_identity, cdr_generate_cdr_identity = 0, 0
+        open_cdr_generate_identity, open_cdr_generate_cdr_identity = 0, 0
+        forward_identity, forward_cdr_identity = 0, 0
 
         # store hypothesis to compute BLEU score
         if eval_bleu:
             hypothesis = []
             forward_result = []
+            cdr_hypothesis = []
+            cdr_open_hypothesis = []
 
         for batch in self.get_iterator(data_set, lang1, params.id2lang[int(not lang1_id)]):
 
             # generate batch
-            (x1, len1), (x2, len2) = batch
+            (x1, len1, w1), (x2, len2, w2) = batch
 
             if lang1 == lang2:
                 x2, len2 = x1, len1
@@ -480,89 +331,193 @@ class EncDecEvaluator(Evaluator):
             # TODO: GPU
             if self.params.cuda:
                 x1, len1, langs1, x2, len2, langs2, y, token_type_ids = to_cuda(x1, len1, langs1, x2, len2, langs2, y, token_type_ids)
-
-            bert_embed = None
-            if self.fused_bert:
-                with torch.no_grad():
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
+                bert_embed = None
+                if self.fused_bert:    
                     bert_embed = self.bert(input_ids=x1.T, token_type_ids=token_type_ids.T, attention_mask=get_masks(x1.size()[0], len1, False)[0]).last_hidden_state
-            # encode source sentence
-            enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
-            enc1 = enc1.transpose(0, 1)
-            enc1 = enc1.half() if params.fp16 else enc1
+                # encode source sentence
+                enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
+                enc1 = enc1.transpose(0, 1)
 
-            # decode target sentence
-            dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
+                # decode target sentence
+                dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
 
-            # loss
-            word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
+                # loss
+                word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
 
-            # update stats
-            n_words += y.size(0)
-            xe_loss += loss.item() * len(y)
-            n_valid += (word_scores.max(1)[1] == y).sum().item()
-            if eval_memory:
-                for k, v in self.memory_list:
-                    all_mem_att[k].append((v.last_indices, v.last_scores))
-            
-            # generate translation - translate / convert to text
-            if eval_bleu:
+                # update stats
+                n_sentences += x1.shape[1]
+                n_words += y.size(0)
+                xe_loss += loss.item() * len(y)
+                n_valid += (word_scores.max(1)[1] == y).sum().item()
                 
-                # max_len = int(1.5 * len1.max().item() + 10)
-                if params.beam_size == 1:
-                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2], bert_embed=bert_embed)
-                else:
-                    generated, lengths = decoder.generate_beam(
-                        enc1, len1, lang2_id, beam_size=params.beam_size,
-                        length_penalty=params.length_penalty,
-                        early_stopping=params.early_stopping,
-                        max_len=self.params.max_len[langs2]
-                    )
-                hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
-                forward_result.extend(convert_to_text(word_scores.max(1)[1],
-                    len2, 
-                    self.dico, 
-                    params, 
-                    'ae',
-                    torch.arange(len(len2), dtype=torch.long, device=pred_mask.device).repeat(pred_mask.shape[0],1).masked_select(pred_mask)))
+                if eval_bleu:
+                    ref = convert_to_text(x2, len2, self.dico, params)
+
+                    if params.beam_size == 1:
+                        generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2], bert_embed=bert_embed)
+                    else:
+                        if lang2 == 'ab':
+                            cdr_generated, cdr_lengths = decoder.generate_beam(
+                                enc1, len1, lang2_id, beam_size=params.beam_size,
+                                length_penalty=params.length_penalty,
+                                early_stopping=params.early_stopping,
+                                max_len=self.params.max_len[lang2] + 2,
+                                bert_embed=bert_embed,
+                                antibody=True,
+                                tgt_frw=x2,
+                                w=w2
+                            )
+                            cdr_hypothesis.extend(convert_to_text(cdr_generated, cdr_lengths, self.dico, params))
+                            batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, cdr_hypothesis, lang2, w2, beam_size=params.beam_size)
+                            cdr_generate_identity += batch_generate_identity
+                            cdr_generate_cdr_identity += batch_generate_cdr_identity
+
+                            cdr_open_generated, cdr_open_lengths = decoder.generate_beam(
+                                enc1, len1, lang2_id, beam_size=params.beam_size,
+                                length_penalty=params.length_penalty,
+                                early_stopping=params.early_stopping,
+                                max_len=self.params.max_len[lang2] + 2,
+                                bert_embed=bert_embed,
+                                antibody=True,
+                                tgt_frw=x2,
+                                w=w2,
+                                open_end=True
+                            )
+                            cdr_open_hypothesis.extend(convert_to_text(cdr_open_generated, cdr_open_lengths, self.dico, params))
+                            batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, cdr_open_hypothesis, lang2, w2, beam_size=params.beam_size)
+                            open_cdr_generate_identity += batch_generate_identity
+                            open_cdr_generate_cdr_identity += batch_generate_cdr_identity
+                            
+
+                        generated, lengths = decoder.generate_beam(
+                            enc1, len1, lang2_id, beam_size=params.beam_size,
+                            length_penalty=params.length_penalty,
+                            early_stopping=params.early_stopping,
+                            max_len=self.params.max_len[lang2] + 2,
+                            bert_embed=bert_embed,
+                            antibody=False,
+                        )
+                        
+                    
+                    hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
+                    forward_result.extend(convert_to_text(word_scores.max(1)[1],
+                        len2, 
+                        self.dico, 
+                        params, 
+                        'ae',
+                        torch.arange(len(len2), dtype=torch.long, device=pred_mask.device).repeat(pred_mask.shape[0],1).masked_select(pred_mask)))
+                    
+                    
+                    
+                    batch_forward_identity, batch_forward_cdr_identity = self.calculate_identity(ref, forward_result, lang2, w2)
+                    batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, hypothesis, lang2, w2, beam_size=params.beam_size)
+
+                    forward_identity += batch_forward_identity
+                    forward_cdr_identity += batch_forward_cdr_identity
+
+                    generate_identity += batch_generate_identity
+                    generate_cdr_identity += batch_generate_cdr_identity
+
 
         if lang1 != lang2:
             # compute perplexity and prediction accuracy
             scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
             scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
+            if eval_bleu:
+                scores['%s-%s-%s_mt_frw_identity' % (data_set, lang1, lang2)] = float(100. * forward_identity / n_sentences)
+                scores['%s-%s-%s_mt_gen_identity' % (data_set, lang1, lang2)] = float(100. * generate_identity / n_sentences)
+                if lang2 == 'ab':
+                    scores['%s-%s-%s_mt_frw_cdr_identity' % (data_set, lang1, lang2)] = float(100. * forward_cdr_identity / n_sentences)
+                    scores['%s-%s-%s_mt_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * generate_cdr_identity / n_sentences)
+                    scores['%s-%s-%s_mt_cdr_gen_identity' % (data_set, lang1, lang2)] = float(100. * cdr_generate_identity / n_sentences)
+                    scores['%s-%s-%s_mt_cdr_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * cdr_generate_cdr_identity / n_sentences)
+                    scores['%s-%s-%s_mt_open_cdr_gen_identity' % (data_set, lang1, lang2)] = float(100. * open_cdr_generate_identity / n_sentences)
+                    scores['%s-%s-%s_mt_open_cdr_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * open_cdr_generate_cdr_identity / n_sentences)
+                    
+
+
         else:
             scores['%s-%s_ae_acc' % (data_set, lang1)] = 100. * n_valid / n_words
-
-        # compute memory usage
-        if eval_memory:
-            for mem_name, mem_att in all_mem_att.items():
-                eval_memory_usage(scores, '%s_%s-%s_%s' % (data_set, lang1, lang2, mem_name), mem_att, params.mem_size)
-
-        # compute BLEU
-        if eval_bleu:
-
+            
+        if lang1 != lang2:
+            hyp_dir = os.path.join(params.hyp_path, str(scores['epoch']))
+            # compute BLEU
             frw_name = 'frw{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
-            frw_path = os.path.join(params.hyp_path, frw_name)
+            frw_path = os.path.join(hyp_dir, frw_name)
 
             # export sentences to hypothesis file / restore BPE segmentation
             with open(frw_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(forward_result) + '\n')
             restore_segmentation(frw_path)
 
-            # hypothesis / reference paths
             hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
-            hyp_path = os.path.join(params.hyp_path, hyp_name)
+            hyp_path = os.path.join(hyp_dir, hyp_name)
 
             # export sentences to hypothesis file / restore BPE segmentation
             with open(hyp_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(hypothesis) + '\n')
             restore_segmentation(hyp_path)
 
-            if lang1 != lang2:
-                # evaluate BLEU score
-                ref_path = params.ref_paths[(lang1, lang2, data_set)]
-                bleu = eval_moses_bleu(ref_path, hyp_path)
-                logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
-                scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
+            # hypothesis / reference paths
+            hyp_name = 'cdr_hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            hyp_path = os.path.join(hyp_dir, hyp_name)
+
+            # export sentences to hypothesis file / restore BPE segmentation
+            with open(hyp_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(cdr_hypothesis) + '\n')
+            restore_segmentation(hyp_path)
+
+            hyp_name = 'open_cdr_hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            hyp_path = os.path.join(hyp_dir, hyp_name)
+
+            # export sentences to hypothesis file / restore BPE segmentation
+            with open(hyp_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(cdr_open_hypothesis) + '\n')
+            restore_segmentation(hyp_path)
+
+
+
+
+
+    def calculate_identity(self, ref, gen_result, lang2, w2, beam_size=1):
+        gen_identity, gen_cdr_identity = 0, 0
+        
+        
+        for i in range(w2.shape[1]):
+            beam_identity, beam_cdr_identity = 0, 0    
+            for k in range(1, beam_size+1):
+                gen_sent = gen_result[-(i*beam_size+k)].replace(" ", "")
+                ref_sent = ref[-i].replace(" ", "")
+                if len(gen_sent) == 0:
+                    continue
+                gen_alignment = self.aligner.align(ref_sent, gen_sent)[0]
+
+                gen_matches = 0
+                gen_index = 0
+                gen_cdr_matches = 0
+
+                for j in range(len(gen_alignment[0])):
+                    if len(gen_sent) > 0 and j < len(gen_alignment[0]):
+                        gen_matches += 1 if gen_alignment[0][j] == gen_alignment[1][j] else 0
+                        if lang2 == 'ab':
+                            gen_cdr_matches += 1 if w2[gen_index, -i] == 1 and gen_alignment[0][j] == gen_alignment[1][j] else 0
+                            if gen_alignment[0][j] != '-':
+                                gen_index += 1
+                
+
+                gen_matches /= len(ref_sent)
+
+                gen_cdr_matches /= w2[:, -i].sum() - 1
+
+                beam_identity += gen_matches
+                beam_cdr_identity += gen_cdr_matches
+
+            gen_identity += beam_identity/beam_size
+
+            gen_cdr_identity += beam_cdr_identity/beam_size
+            
+        return gen_identity, gen_cdr_identity
 
 
 def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
@@ -584,11 +539,15 @@ def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
             for k in range(1, lengths[j]):
                 if batch[k, j] == params.eos_index:
                     break
+                if batch[k, j] < 5 or batch[k, j] > 24:
+                    continue
                 words.append(dico[batch[k, j]])
             sentences.append(" ".join(words))
     else:
         sentences = [[] for _ in range(len(lengths))]
         for i in range(len(map)):
+            if batch[i] < 5 or batch[i] > 24:
+                    continue
             sentences[map[i]].append(dico[batch[i]])
 
         sentences = [" ".join(words[1:-1]) for words in sentences]

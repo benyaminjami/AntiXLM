@@ -263,7 +263,7 @@ class ParallelDataset(Dataset):
         self.bos_index = params.bos_index
         self.pad_index = params.pad_index
         self.batch_size = params.batch_size
-        self.tokens_per_batch = params.tokens_per_batch
+        self.tokens_per_batch = params.tokens_per_batch // params.beam_size
         self.max_batch_size = params.max_batch_size
 
         self.sent1 = sent1
@@ -375,8 +375,20 @@ class ParallelDataset(Dataset):
                 sentence_ids = sentence_ids[:self.max_batch_size]
             pos1 = self.pos1[sentence_ids]
             pos2 = self.pos2[sentence_ids]
-            sent1 = self.batch_sentences([self.sent1[a:b] for a, b in pos1])
-            sent2 = self.batch_sentences([self.sent2[a:b] for a, b in pos2])
+            sent1 = [self.sent1[a:b] for a, b in pos1]
+            sent2 = [self.sent2[a:b] for a, b in pos2]
+            if self.weights1 is not None:
+                weights1 = [self.weights1[a:b] for a, b in pos1]
+            else:
+                weights1 = [np.ones_like(s) for s in sent1]
+            if self.weights2 is not None:
+                weights2 = [self.weights2[a:b] for a, b in pos2]
+            else:
+                weights2 = [np.ones_like(s) for s in sent2]
+
+            sent1 = self.batch_sentences(sent1, weights1)
+            sent2 = self.batch_sentences(sent2, weights2)
+
             yield (sent1, sent2, sentence_ids) if return_indices else (sent1, sent2)
 
     def get_iterator(self, shuffle, group_by_size=False, n_sentences=-1, return_indices=False):

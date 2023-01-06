@@ -55,13 +55,12 @@ def initialize_exp(params):
     """
     global board_writer
 
-    t = datetime.datetime.now()
-    # t = t.replace(second=0, microsecond=0, minute=(t.minute%12)*5)
-    t = "2022-11-29 22:25:00"
-    wandb.init(project=params.exp_name,
-               group='DDP' + str(t))
-    wandb.run.name = 'Worker_' + str(params.global_rank) 
-    wandb.run.save()
+    t = os.environ['SLURM_JOBID']
+    if params.global_rank % params.n_gpu_per_node == 0:    
+        wandb.init(project=params.exp_name,
+                group='DDP' + str(t))
+        wandb.run.name = 'Worker_' + os.environ['SLURM_PROCID'] + str(os.environ.get("LOCAL_RANK", 0))
+        wandb.run.save()
 
     # dump parameters
     get_dump_path(params)
@@ -91,8 +90,8 @@ def initialize_exp(params):
     # create a logger
     logger = create_logger(os.path.join(params.dump_path, 'train.log'), rank=getattr(params, 'global_rank', 0))
     logger.info("============ Initialized logger ============")
-    logger.info("\n".join("%s: %s" % (k, str(v))
-                          for k, v in sorted(dict(vars(params)).items())))
+    # logger.info("\n".join("%s: %s" % (k, str(v))
+    #                       for k, v in sorted(dict(vars(params)).items())))
     logger.info("The experiment will be stored in %s\n" % params.dump_path)
     logger.info("Running command: %s" % command)
     logger.info("")

@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=AntiXLM
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --qos=normal
 
 ### e.g. request 4 nodes with 1 gpu each, totally 4 gpus (WORLD_SIZE==4)
 ### Note: --gres=gpu:x should equal to ntasks-per-node
-#SBATCH --nodes=16
+#SBATCH --nodes=24
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=64GB
-#SBATCH --gres=gpu:1
-#SBATCH --partition=rtx6000
-#SBATCH --cpus-per-task=16
+#SBATCH --mem=90GB
+#SBATCH --gres=gpu:4
+#SBATCH --partition=a40
+##,t4v2,rtx6000
+#SBATCH --cpus-per-task=15
 #SBATCH --hint=nomultithread
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
@@ -19,7 +20,6 @@
 ### change 5-digit MASTER_PORT as you wish, slurm will raise Error if duplicated with others
 ### change WORLD_SIZE as gpus/node * num_nodes
 export MASTER_PORT=12340
-export WORLD_SIZE=16
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 export NCCL_SHM_DISABLE=1
@@ -29,25 +29,51 @@ export NCCL_IB_DISABLE=1
 echo "NODELIST="${SLURM_NODELIST}
 master_addr=$(/opt/slurm/bin/scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
-export LD_LIBRARY_PATH=/pkgs/nccl_2.9.9-1+cuda11.3_x86_64/lib:LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=/pkgs/cuda-11.3/lib64:LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/pkgs/nccl_2.9.9-1+cuda11.3_x86_64/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/pkgs/cuda-11.3/lib64:$LD_LIBRARY_PATH
 echo "MASTER_ADDR="$MASTER_ADDR
-
+cp -r /checkpoint/benjami/8899571/unsupMT_agab/ /checkpoint/${USER}/${SLURM_JOB_ID}
+# ln -sfn /checkpoint/${USER}/${SLURM_JOB_ID} $PWD/checkpoint/${SLURM_JOB_ID}
 ### init virtual environment if needed
-module load cuda-11.3
+module load cuda-11.3 nccl_2.9.9-1+cuda11.3
 source ~/.bashrc 
 conda activate AntiXLM
 echo "Env Loaded"
 ### the command to run
-echo "hostname; sleep \$(( SLURM_PROCID * 5 )); nvidia-smi; export NGPU=16; 
-python train.py \
+echo "hostname; sleep \$(( SLURM_PROCID * 10 )); nvidia-smi;
+case $SLURM_JOB_PARTITION in
+a40)
+tokens=8000
+;;
+rtx6000)
+tokens=2000
+;;
+t4v2)
+tokens=1000
+;;
+interactive)
+echo don\'t know
+tokens=2000
+;;
+esac;
+echo $SLURM_JOB_PARTITION;
+torchrun \
+--nnodes=\$SLURM_JOB_NUM_NODES \
+--nproc_per_node=4 \
+--max_restarts=1 \
+--rdzv_backend=c10d \
+--rdzv_endpoint=172.17.8.\$(expr \${MASTER_ADDR:3:3} - 0) \
+train.py \
 --cuda True \
 --exp_name unsupMT_agab \
---dump_path /h/benjami/AntiXLM/dumped/ \
+--dump_path /checkpoint/\${USER}/\${SLURM_JOB_ID} \
 --data_path /h/benjami/AntiXLM/data/ \
 --lgs 'ab-ag' \
 --ae_steps 'ab,ag' \
 --bt_steps 'ab-ag-ab,ag-ab-ag' \
+--mt_steps 'ag-ab,ab-ag' \
+--mt_steps_ratio 25 \
+--mt_steps_warmup 50 \
 --word_shuffle 3 \
 --word_dropout 0.1 \
 --word_blank 0.1 \
@@ -60,17 +86,17 @@ python train.py \
 --dropout 0.1 \
 --attention_dropout 0.1 \
 --gelu_activation true \
---tokens_per_batch 3000 \
---batch_size 128 \
---optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.0001 \
---epoch_size 51200 \
+--tokens_per_batch \$tokens \
+--batch_size 512 \
+--optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.001 \
+--epoch_size 125000 \
 --eval_bleu true \
---beam_size 1 \
+--beam_size 10 \
 --stopping_criterion 'valid_ag-ab_mt_bleu,10' \
 --validation_metrics 'valid_ag-ab_mt_bleu' \
 --master_port 12340" > srun_worker.sh
 
-srun --mem=64GB --cpus-per-task=16 bash srun_worker.sh 
+srun --mem=90GB --cpus-per-task=15 bash srun_worker.sh 
 wait
 
 
