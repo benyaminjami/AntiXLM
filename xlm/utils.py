@@ -54,13 +54,15 @@ def initialize_exp(params):
     - create a logger
     """
     global board_writer
-
-    t = os.environ['SLURM_JOBID']
-    if params.global_rank % params.n_gpu_per_node == 0:    
+    if params.reporter:    
         wandb.init(project=params.exp_name,
-                group='DDP' + str(t))
-        wandb.run.name = 'Worker_' + os.environ['SLURM_PROCID'] + str(os.environ.get("LOCAL_RANK", 0))
+                group='DDP' + str(os.environ['SLURM_JOBID']))
+        wandb.run.name = 'Worker_' + os.environ['SLURM_PROCID'] + '_' + str(os.environ.get("LOCAL_RANK", 0))
         wandb.run.save()
+        #creat a tensorboard
+        board_writer = SummaryWriter(params.dump_path)
+
+
 
     # dump parameters
     get_dump_path(params)
@@ -84,14 +86,11 @@ def initialize_exp(params):
     # check experiment name
     assert len(params.exp_name.strip()) > 0
 
-    #creat a tensorboard
-    board_writer = SummaryWriter(params.dump_path)
-
     # create a logger
     logger = create_logger(os.path.join(params.dump_path, 'train.log'), rank=getattr(params, 'global_rank', 0))
     logger.info("============ Initialized logger ============")
-    # logger.info("\n".join("%s: %s" % (k, str(v))
-    #                       for k, v in sorted(dict(vars(params)).items())))
+    logger.info("\n".join("%s: %s" % (k, str(v))
+                          for k, v in sorted(dict(vars(params)).items())))
     logger.info("The experiment will be stored in %s\n" % params.dump_path)
     logger.info("Running command: %s" % command)
     logger.info("")

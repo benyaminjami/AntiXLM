@@ -53,8 +53,9 @@ class Trainer(object):
 
         if params.multi_gpu:
             logger.info("Using nn.parallel.DistributedDataParallel ...")
-            for name in self.MODEL_NAMES:
-                setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True))
+            
+            self.encoder = nn.parallel.DistributedDataParallel(self.encoder, device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True)
+            self.decoder = nn.parallel.DistributedDataParallel(self.decoder, device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True)
 
         # set optimizers
         self.set_optimizers()
@@ -123,12 +124,14 @@ class Trainer(object):
         """
         params = self.params
         self.parameters = {}
+        self.parameters_name = []
         named_params = []
         for name in self.MODEL_NAMES:
             named_params.extend([(k, p) for k, p in getattr(self, name).named_parameters() if p.requires_grad])
 
         # model (excluding memory values)
         self.parameters['model'] = [p for k, p in named_params]
+        self.parameters_name = [k for k, p in named_params]
 
 
         # log
@@ -142,35 +145,15 @@ class Trainer(object):
         """
         params = self.params
         self.optimizers = {}
+        self.optimizing_steps = []
 
         # model optimizer (excluding memory values)
         self.optimizers['model'] = get_optimizer(self.parameters['model'], params.optimizer)
 
-       
         # log
         logger.info("Optimizers: %s" % ", ".join(self.optimizers.keys()))
 
-    def init_amp(self):
-        """
-        Initialize AMP optimizer.
-        """
-        params = self.params
-        assert params.amp == 0 and params.fp16 is False or params.amp in [1, 2, 3] and params.fp16 is True
-        opt_names = self.optimizers.keys()
-        models = [getattr(self, name) for name in self.MODEL_NAMES]
-        models, optimizers = apex.amp.initialize(
-            models,
-            [self.optimizers[k] for k in opt_names],
-            opt_level=('O%i' % params.amp)
-        )
-        for name, model in zip(self.MODEL_NAMES, models):
-            setattr(self, name, model)
-        self.optimizers = {
-            opt_name: optimizer
-            for opt_name, optimizer in zip(opt_names, optimizers)
-        }
-
-    def optimize(self, loss):
+    def optimize(self, loss, step, optimize=False):
         """
         Optimize.
         """
@@ -199,8 +182,24 @@ class Trainer(object):
                 optimizer.step()
         # AMP optimization
         else:
-            if self.n_iter % params.accumulate_gradients == 0:
+            if self.n_iter != 0 and self.n_iter % params.accumulate_gradients == 0 and optimize:
                 self.scaler.scale(loss).backward()
+                self.optimizing_steps.append(step)
+                flag1, flag2 = False, False
+                zero_grads = ''
+                for i in range(len(self.parameters['model'])):
+                    if self.parameters['model'][i].grad is None:
+                        logger.warning("No Gradient for layer {0}:   {1}".format(i, self.parameters_name[i]))
+                        flag1 = True
+                    elif self.parameters['model'][i].grad.count_nonzero() == 0:
+                        zero_grads += str(i) + ': ' + self.parameters_name[i] + '\t'
+                        flag2 = True
+                if flag1:
+                    exit()
+                if flag2:
+                    logger.warning(str(self.optimizing_steps))
+                    logger.warning("Zero Gradient for layers {0}".format(zero_grads))
+
                 if params.clip_grad_norm > 0:
                     self.scaler.unscale_(optimizers[0])
 
@@ -211,10 +210,19 @@ class Trainer(object):
                     self.scaler.step(optimizer)
                     optimizer.zero_grad()
                 self.scaler.update()
+                self.optimizing_steps.clear()
+
                 
             else:
-                self.scaler.scale(loss).backward()
+                if params.multi_gpu:
+                    with self.encoder.no_sync(), self.decoder.no_sync():
+                        self.scaler.scale(loss).backward()
+                else:
+                    self.scaler.scale(loss).backward()
 
+                self.optimizing_steps.append(step)
+
+            
     def iter(self):
         """
         End of iteration.
@@ -224,11 +232,16 @@ class Trainer(object):
         update_lambdas(self.params, self.n_total_iter)
         self.print_stats()
 
+    def get_sampling_tempreture(self, step, init_temp=2, decay_steps=1500, steepness=10):
+        sigmoid = 1 / (1 + np.exp(steepness * (step / decay_steps - 0.5)))
+        return init_temp * sigmoid
+
+
     def print_stats(self):
         """
         Print statistics about the training.
         """
-        if self.params.global_rank % self.params.n_gpu_per_node != 0:
+        if not self.params.reporter:
             return
         if self.n_total_iter % 5 != 0:
             return
@@ -237,11 +250,13 @@ class Trainer(object):
             if type(v) is list:
                 if len(v) > 0:
                     utils.board_writer.add_scalar(str(k), float(v[-1]), self.n_total_iter)
-                    wandb.log({str(k): np.mean(v)}, step=self.n_total_iter)
+                    utils.wandb.log({str(k): np.mean(v)}, step=self.n_total_iter)
             else:
                 utils.board_writer.add_scalar(str(k), float(v), self.n_total_iter)  
-                wandb.log({str(k): float(v)}, step=self.n_total_iter)
+                utils.wandb.log({str(k): float(v)}, step=self.n_total_iter)
         
+        utils.wandb.log({'Sampling Temp': float(self.get_sampling_tempreture(step=self.n_total_iter))}, step=self.n_total_iter)
+
         s_iter = "%7i - " % self.n_total_iter
         s_stat = ' || '.join([
             '{}: {:7.4f}'.format(k, np.mean(v)) for k, v in self.stats.items()
@@ -255,7 +270,7 @@ class Trainer(object):
         s_lr = " - "
         for k, v in self.optimizers.items():
             s_lr = s_lr + (" - %s LR: " % k) + " / ".join("{:.4e}".format(group['lr']) for group in v.param_groups)
-            wandb.log({'Learning Rate': float(v.param_groups[0]['lr'])}, step=self.n_total_iter)
+            utils.wandb.log({'Learning Rate': float(v.param_groups[0]['lr'])}, step=self.n_total_iter)
 
         # processing speed
         new_time = time.time()
@@ -264,7 +279,7 @@ class Trainer(object):
             self.stats['processed_s'] * 1.0 / diff,
             self.stats['processed_w'] * 1.0 / diff
         )
-        wandb.log({'processed_s': float(self.stats['processed_s'] * 1.0 / diff),
+        utils.wandb.log({'processed_s': float(self.stats['processed_s'] * 1.0 / diff),
                    'processed_w': float(self.stats['processed_w'] * 1.0 / diff)}, step=self.n_total_iter)
 
         self.stats['processed_s'] = 0
@@ -520,6 +535,7 @@ class Trainer(object):
         data['params'] = {k: v for k, v in self.params.__dict__.items()}
 
         torch.save(data, path)
+    
 
     def reload_checkpoint(self):
         """
@@ -534,6 +550,10 @@ class Trainer(object):
                 assert os.path.isfile(checkpoint_path)
         logger.warning(f"Reloading checkpoint from {checkpoint_path} ...")
         data = torch.load(checkpoint_path, map_location='cpu')
+
+        if not self.params.multi_gpu:
+            data['encoder'] = {k.replace('module.', ''):data['encoder'][k] for k in data['encoder']}
+            data['decoder'] = {k.replace('module.', ''):data['decoder'][k] for k in data['decoder']}
 
         # reload model parameters
         for name in self.MODEL_NAMES:
@@ -841,12 +861,15 @@ class EncDecTrainer(Trainer):
             (x1, len1) = self.add_noise(x1, len1)
         else:
             (x1, len1, w1), (x2, len2, w2) = self.get_batch('mt', lang1, lang2)
+            if lang2 == 'ab':
+                w2 = (w2 * (params.cdr_weight - 1)) + 1
+            
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
 
         # target words to predict
         alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
-        pred_mask = (alen[:, None] < len2[None] - 1)[:-1] * (w2[1:] > 0)   # do not predict anything given the last target word
+        pred_mask = (alen[:, None] < len2[None] - 1)[:-1]   # do not predict anything given the last target word
         y = x2[1:].masked_select(pred_mask)
         w2 = w2[1:].masked_select(pred_mask)
         
@@ -871,21 +894,19 @@ class EncDecTrainer(Trainer):
             dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
             
             # loss
-            _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False, weights=w2)
+            scores, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True, weights=w2)
             self.stats[('AE-%s-loss' % lang1) if lang1 == lang2 else ('MT-%s-%s-loss' % (lang1, lang2))].append(loss.item())
             loss = lambda_coeff * loss
-        
-
 
         # optimize
-        self.optimize(loss)
+        self.optimize(loss, ('AE-%s-loss' % lang1) if lang1 == lang2 else ('MT-%s-%s-loss' % (lang1, lang2)))
 
         # number of processed sentences / words
         self.n_sentences += params.batch_size
         self.stats['processed_s'] += len2.size(0)
         self.stats['processed_w'] += (len2 - 1).sum().item()
 
-    def bt_step(self, lang1, lang2, lang3, lambda_coeff):
+    def bt_step(self, lang1, lang2, lang3, lambda_coeff, optimize):
         """
         Back-translation step for machine translation.
         """
@@ -928,7 +949,7 @@ class EncDecTrainer(Trainer):
                 enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
                 enc1 = enc1.transpose(0, 1)
                 
-                x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed)
+                x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed, sample_temperature=self.get_sampling_tempreture(step=self.n_total_iter))
                 langs2 = x2.clone().fill_(lang2_id)
 
                 bert_embed = None
@@ -952,7 +973,7 @@ class EncDecTrainer(Trainer):
 
             # words to predict
             alen = torch.arange(len1.max(), dtype=torch.long, device=len1.device)
-            pred_mask = (alen[:, None] < len1[None] - 1)[:-1] * (w1[1:] > 0)   # do not predict anything given the last target word
+            pred_mask = (alen[:, None] < len1[None] - 1)[:-1]  # do not predict anything given the last target word
             y = x1[1:].masked_select(pred_mask)
             w1 = w1[1:].masked_select(pred_mask)
             
@@ -964,7 +985,7 @@ class EncDecTrainer(Trainer):
             self.stats[('BT-%s-%s-%s-loss' % (lang1, lang2, lang3))].append(loss.item())
             loss = lambda_coeff * loss
         # optimize
-        self.optimize(loss)
+        self.optimize(loss, ('BT-%s-%s-%s-loss' % (lang1, lang2, lang3)), optimize)
 
         # number of processed sentences / words
         self.n_sentences += params.batch_size

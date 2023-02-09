@@ -8,11 +8,13 @@
 from logging import getLogger
 import os
 import Bio
+import wandb
 import subprocess
 from Bio.Align import substitution_matrices
 from collections import OrderedDict
 import numpy as np
 import torch
+import xlm.utils as utils
 from ..model.transformer import get_masks
 from ..utils import to_cuda, restore_segmentation, concat_batches
 # from ..model.memory import HashingMemory
@@ -116,8 +118,9 @@ class Evaluator(object):
             _lang1, _lang2 = (lang1, lang2) if lang1 < lang2 else (lang2, lang1)
             iterator = self.data['para'][(_lang1, _lang2)][data_set].get_iterator(
                 shuffle=False,
-                group_by_size=True,
-                n_sentences=n_sentences
+                group_by_size=False,
+                n_sentences=n_sentences,
+                beam_size=self.params.beam_size
             )
 
         for batch in iterator:
@@ -200,49 +203,49 @@ class Evaluator(object):
         """
         Run all evaluations.
         """
+        logger.info("============ Starting evaluating epoch %i ... ============" % trainer.epoch)
         params = self.params
         scores = OrderedDict({'epoch': trainer.epoch})
         data_set_dictionary = {
-            "ag-ab.test":0,
-            "ab-ag.test":1,
-            "ag-ab.valid":2,
-            "ab-ag.valid":3,
-            "ag-ab.valid-cdr":4, 
-            "ag-ab.valid-cdr_open":5, 
-            "ag-ab.test-cdr":6, 
-            "ag-ab.test-cdr_open":7 
+            "ab-ag.test":0,
+            "ag-ab.test":1,
+            "ag-ab.test-cdr":2, 
+            "ag-ab.test-cdr_open":3,
+            "ab-ag.valid":4,
+            "ag-ab.valid":5,
+            "ag-ab.valid-cdr":6, 
+            "ag-ab.valid-cdr_open":7 
         }
-        try:
-            os.mkdir(os.path.join(params.hyp_path, str(scores['epoch'])))
-        except:
-            print('Folder exists')
+
+        os.makedirs(os.path.join(params.hyp_path, str(scores['epoch'])), exist_ok=True)
+
         with torch.no_grad():
 
             for data_set in ['valid', 'test']:
 
-                for lang in params.ae_steps:
-                    self.evaluate_mt(scores, data_set, lang, lang, False)
+                # for lang in params.ae_steps:
+                #     self.evaluate_mt(scores, data_set, lang, lang, False)
 
                 # machine translation task (evaluate perplexity and accuracy)
-                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
-                    eval_bleu = params.eval_bleu and \
-                        data_set_dictionary["{0}-{1}.{2}".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
-                    if eval_bleu:
-                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
+                for lang1, lang2 in (('ag', 'ab'), ('ab', 'ag')):                    
+                    generate = params.eval_bleu and \
+                        data_set_dictionary["{0}-{1}.{2}".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
+                    if generate:
+                        self.evaluate_mt(scores, data_set, lang1, lang2, generate)
 
-                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
-                    eval_bleu = params.eval_bleu and \
-                        data_set_dictionary["{0}-{1}.{2}-cdr".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
-                    if eval_bleu:
-                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu, cdr=True)
+                lang1, lang2 = 'ag', 'ab'              
+                generate = params.eval_bleu and \
+                    data_set_dictionary["{0}-{1}.{2}-cdr".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
+                if generate:
+                    self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True)
                 
-                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):                    
-                    eval_bleu = params.eval_bleu and params.open and \
-                        data_set_dictionary["{0}-{1}.{2}-cdr_open".format(lang1, lang2, data_set)] % (params.world_size) == params.node_id
-                    if eval_bleu:
-                        self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
+                
+                generate = params.eval_bleu and params.open and \
+                    data_set_dictionary["{0}-{1}.{2}-cdr_open".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
+                if generate:
+                    self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True, unrestricted=True)
                     
-
+        logger.info("============ End evaluating epoch %i ... ============" % trainer.epoch)
         return scores
 
 class SingleEvaluator(Evaluator):
@@ -271,9 +274,11 @@ class EncDecEvaluator(Evaluator):
             self.bert = bert
         self.aligner = Bio.Align.PairwiseAligner()
         self.aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
+        self.aligner.open_gap_score = -10
+        self.aligner.extend_gap_score = -0.5
 
 
-    def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
+    def evaluate_mt(self, scores, data_set, lang1, lang2, generate, cdr=False, unrestricted=False):
         """
         Evaluate perplexity and next word prediction accuracy.
         """
@@ -297,19 +302,15 @@ class EncDecEvaluator(Evaluator):
         xe_loss = 0
         n_valid = 0
         generate_identity, generate_cdr_identity = 0, 0
-        cdr_generate_identity, cdr_generate_cdr_identity = 0, 0
-        open_cdr_generate_identity, open_cdr_generate_cdr_identity = 0, 0
         forward_identity, forward_cdr_identity = 0, 0
 
         # store hypothesis to compute BLEU score
-        if eval_bleu:
+
+        if generate:
             hypothesis = []
             forward_result = []
-            cdr_hypothesis = []
-            cdr_open_hypothesis = []
-
+  
         for batch in self.get_iterator(data_set, lang1, params.id2lang[int(not lang1_id)]):
-
             # generate batch
             (x1, len1, w1), (x2, len2, w2) = batch
 
@@ -323,14 +324,16 @@ class EncDecEvaluator(Evaluator):
             alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
             pred_mask = (alen[:, None] < len2[None] - 1)[:-1]   # do not predict anything given the last target word
             y = x2[1:].masked_select(pred_mask)
-            
+            n_sentences += x1.shape[1]
+            n_words += y.size(0)
             token_type_ids = torch.zeros_like(x1)
-            # assert len(y) == (len2 - 1).sum().item()
             
             # cuda
             # TODO: GPU
             if self.params.cuda:
                 x1, len1, langs1, x2, len2, langs2, y, token_type_ids = to_cuda(x1, len1, langs1, x2, len2, langs2, y, token_type_ids)
+            ref = convert_to_text(x2, len2, self.dico, params)
+
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.params.amp == 1)):
                 bert_embed = None
                 if self.fused_bert:    
@@ -340,105 +343,80 @@ class EncDecEvaluator(Evaluator):
                 enc1 = enc1.transpose(0, 1)
 
                 # decode target sentence
-                dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
+                if not cdr:
+                    dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
 
-                # loss
-                word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
+                    # loss
+                    word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
 
-                # update stats
-                n_sentences += x1.shape[1]
-                n_words += y.size(0)
-                xe_loss += loss.item() * len(y)
-                n_valid += (word_scores.max(1)[1] == y).sum().item()
+                    # update stats
+                    xe_loss += loss.item() * len(y)
+                    n_valid += (word_scores.max(1)[1] == y).sum().item()
+
+                    forward_text = convert_to_text(word_scores.max(1)[1],
+                        len2, 
+                        self.dico, 
+                        params, 
+                        'ae',
+                        torch.arange(len(len2), dtype=torch.long, device=pred_mask.device).repeat(pred_mask.shape[0],1).masked_select(pred_mask))
+                    
+                    forward_result.extend(forward_text)
+
+                    batch_forward_identity, batch_forward_cdr_identity = calculate_identity(self.aligner, ref, forward_text, lang2, w2)
+                    forward_identity += batch_forward_identity
+                    forward_cdr_identity += batch_forward_cdr_identity
+
                 
-                if eval_bleu:
-                    ref = convert_to_text(x2, len2, self.dico, params)
-
+                if generate:
                     if params.beam_size == 1:
                         generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2], bert_embed=bert_embed)
+                        
                     else:
-                        if lang2 == 'ab':
-                            cdr_generated, cdr_lengths = decoder.generate_beam(
-                                enc1, len1, lang2_id, beam_size=params.beam_size,
-                                length_penalty=params.length_penalty,
-                                early_stopping=params.early_stopping,
-                                max_len=self.params.max_len[lang2] + 2,
-                                bert_embed=bert_embed,
-                                antibody=True,
-                                tgt_frw=x2,
-                                w=w2
-                            )
-                            cdr_hypothesis.extend(convert_to_text(cdr_generated, cdr_lengths, self.dico, params))
-                            batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, cdr_hypothesis, lang2, w2, beam_size=params.beam_size)
-                            cdr_generate_identity += batch_generate_identity
-                            cdr_generate_cdr_identity += batch_generate_cdr_identity
-
-                            cdr_open_generated, cdr_open_lengths = decoder.generate_beam(
-                                enc1, len1, lang2_id, beam_size=params.beam_size,
-                                length_penalty=params.length_penalty,
-                                early_stopping=params.early_stopping,
-                                max_len=self.params.max_len[lang2] + 2,
-                                bert_embed=bert_embed,
-                                antibody=True,
-                                tgt_frw=x2,
-                                w=w2,
-                                open_end=True
-                            )
-                            cdr_open_hypothesis.extend(convert_to_text(cdr_open_generated, cdr_open_lengths, self.dico, params))
-                            batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, cdr_open_hypothesis, lang2, w2, beam_size=params.beam_size)
-                            open_cdr_generate_identity += batch_generate_identity
-                            open_cdr_generate_cdr_identity += batch_generate_cdr_identity
-                            
-
                         generated, lengths = decoder.generate_beam(
                             enc1, len1, lang2_id, beam_size=params.beam_size,
                             length_penalty=params.length_penalty,
                             early_stopping=params.early_stopping,
                             max_len=self.params.max_len[lang2] + 2,
                             bert_embed=bert_embed,
-                            antibody=False,
+                            cdr_generation=cdr,
+                            tgt_frw=x2,
+                            w=w2,
+                            open_end=unrestricted
                         )
                         
-                    
-                    hypothesis.extend(convert_to_text(generated, lengths, self.dico, params))
-                    forward_result.extend(convert_to_text(word_scores.max(1)[1],
-                        len2, 
-                        self.dico, 
-                        params, 
-                        'ae',
-                        torch.arange(len(len2), dtype=torch.long, device=pred_mask.device).repeat(pred_mask.shape[0],1).masked_select(pred_mask)))
-                    
-                    
-                    
-                    batch_forward_identity, batch_forward_cdr_identity = self.calculate_identity(ref, forward_result, lang2, w2)
-                    batch_generate_identity, batch_generate_cdr_identity = self.calculate_identity(ref, hypothesis, lang2, w2, beam_size=params.beam_size)
-
-                    forward_identity += batch_forward_identity
-                    forward_cdr_identity += batch_forward_cdr_identity
-
+                    hypothesis_text = convert_to_text(generated, lengths, self.dico, params)
+                    hypothesis.extend(hypothesis_text)
+                    batch_generate_identity, batch_generate_cdr_identity = calculate_identity(self.aligner, ref, hypothesis_text, lang2, w2, beam_size=params.beam_size)
                     generate_identity += batch_generate_identity
                     generate_cdr_identity += batch_generate_cdr_identity
 
+        s = ''
+        if unrestricted:
+            s+='_unrestricted'
+        if cdr:
+            s+='_fixedFW'
+        s += '_identity'
+        if unrestricted or cdr:
+            report_metric(metric_name='mt_gen_cdr' + s, step=scores['epoch'], value=float(100. * generate_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+            
+        elif lang1 != lang2:
+            report_metric(metric_name='mt_ppl', step=scores['epoch'], value=np.exp(xe_loss / n_words), args=(data_set, lang1, lang2), scores=scores)
 
-        if lang1 != lang2:
-            # compute perplexity and prediction accuracy
-            scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
-            scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
-            if eval_bleu:
-                scores['%s-%s-%s_mt_frw_identity' % (data_set, lang1, lang2)] = float(100. * forward_identity / n_sentences)
-                scores['%s-%s-%s_mt_gen_identity' % (data_set, lang1, lang2)] = float(100. * generate_identity / n_sentences)
+            report_metric(metric_name='mt_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1, lang2), scores=scores)
+
+            if generate:    
+                report_metric(metric_name='mt_frw_identity', step=scores['epoch'], value=float(100. * forward_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+ 
+                report_metric(metric_name='mt_gen_identity', step=scores['epoch'], value=float(100. * generate_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+                
                 if lang2 == 'ab':
-                    scores['%s-%s-%s_mt_frw_cdr_identity' % (data_set, lang1, lang2)] = float(100. * forward_cdr_identity / n_sentences)
-                    scores['%s-%s-%s_mt_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * generate_cdr_identity / n_sentences)
-                    scores['%s-%s-%s_mt_cdr_gen_identity' % (data_set, lang1, lang2)] = float(100. * cdr_generate_identity / n_sentences)
-                    scores['%s-%s-%s_mt_cdr_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * cdr_generate_cdr_identity / n_sentences)
-                    scores['%s-%s-%s_mt_open_cdr_gen_identity' % (data_set, lang1, lang2)] = float(100. * open_cdr_generate_identity / n_sentences)
-                    scores['%s-%s-%s_mt_open_cdr_gen_cdr_identity' % (data_set, lang1, lang2)] = float(100. * open_cdr_generate_cdr_identity / n_sentences)
+                    report_metric(metric_name='mt_frw_cdr_identity', step=scores['epoch'], value=float(100. * forward_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+                    
+                    report_metric(metric_name='mt_gen_cdr_identity', step=scores['epoch'], value=float(100. * generate_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
                     
 
-
         else:
-            scores['%s-%s_ae_acc' % (data_set, lang1)] = 100. * n_valid / n_words
+            report_metric(metric_name='ae_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1), scores=scores)
             
         if lang1 != lang2:
             hyp_dir = os.path.join(params.hyp_path, str(scores['epoch']))
@@ -451,7 +429,7 @@ class EncDecEvaluator(Evaluator):
                 f.write('\n'.join(forward_result) + '\n')
             restore_segmentation(frw_path)
 
-            hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            hyp_name = 'hyp{0}.{1}-{2}.{3}.{4}.txt'.format(scores['epoch'], lang1, lang2, data_set, s)
             hyp_path = os.path.join(hyp_dir, hyp_name)
 
             # export sentences to hypothesis file / restore BPE segmentation
@@ -459,66 +437,51 @@ class EncDecEvaluator(Evaluator):
                 f.write('\n'.join(hypothesis) + '\n')
             restore_segmentation(hyp_path)
 
-            # hypothesis / reference paths
-            hyp_name = 'cdr_hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
-            hyp_path = os.path.join(hyp_dir, hyp_name)
+def calculate_identity(aligner, ref, gen_result, lang2, w2, beam_size=1):
+    gen_identity, gen_cdr_identity = 0, 0
+    
+    
+    for i in range(w2.shape[1]):
+        beam_identity, beam_cdr_identity = 0, 0    
+        for k in range(1, beam_size+1):
+            gen_sent = gen_result[-(i*beam_size+k)].replace(" ", "")
+            ref_sent = ref[-i].replace(" ", "")
+            if len(gen_sent) == 0:
+                continue
+            gen_alignment = aligner.align(ref_sent, gen_sent)[0]
 
-            # export sentences to hypothesis file / restore BPE segmentation
-            with open(hyp_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(cdr_hypothesis) + '\n')
-            restore_segmentation(hyp_path)
+            gen_matches = 0
+            gen_index = 0
+            gen_cdr_matches = 0
 
-            hyp_name = 'open_cdr_hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
-            hyp_path = os.path.join(hyp_dir, hyp_name)
-
-            # export sentences to hypothesis file / restore BPE segmentation
-            with open(hyp_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(cdr_open_hypothesis) + '\n')
-            restore_segmentation(hyp_path)
-
-
-
-
-
-    def calculate_identity(self, ref, gen_result, lang2, w2, beam_size=1):
-        gen_identity, gen_cdr_identity = 0, 0
-        
-        
-        for i in range(w2.shape[1]):
-            beam_identity, beam_cdr_identity = 0, 0    
-            for k in range(1, beam_size+1):
-                gen_sent = gen_result[-(i*beam_size+k)].replace(" ", "")
-                ref_sent = ref[-i].replace(" ", "")
-                if len(gen_sent) == 0:
-                    continue
-                gen_alignment = self.aligner.align(ref_sent, gen_sent)[0]
-
-                gen_matches = 0
-                gen_index = 0
-                gen_cdr_matches = 0
-
-                for j in range(len(gen_alignment[0])):
-                    if len(gen_sent) > 0 and j < len(gen_alignment[0]):
-                        gen_matches += 1 if gen_alignment[0][j] == gen_alignment[1][j] else 0
-                        if lang2 == 'ab':
-                            gen_cdr_matches += 1 if w2[gen_index, -i] == 1 and gen_alignment[0][j] == gen_alignment[1][j] else 0
-                            if gen_alignment[0][j] != '-':
-                                gen_index += 1
-                
-
-                gen_matches /= len(ref_sent)
-
-                gen_cdr_matches /= w2[:, -i].sum() - 1
-
-                beam_identity += gen_matches
-                beam_cdr_identity += gen_cdr_matches
-
-            gen_identity += beam_identity/beam_size
-
-            gen_cdr_identity += beam_cdr_identity/beam_size
+            for j in range(len(gen_alignment[0])):
+                if len(gen_sent) > 0 and j < len(gen_alignment[0]):
+                    gen_matches += 1 if gen_alignment[0][j] == gen_alignment[1][j] else 0
+                    if lang2 == 'ab':
+                        gen_cdr_matches += 1 if w2[gen_index, -i] == 1 and gen_alignment[0][j] == gen_alignment[1][j] else 0
+                        if gen_alignment[0][j] != '-':
+                            gen_index += 1
             
-        return gen_identity, gen_cdr_identity
 
+            gen_matches /= len(ref_sent)
+
+            gen_cdr_matches /= w2[:, -i].sum() - 1
+
+            beam_identity += gen_matches
+            beam_cdr_identity += gen_cdr_matches
+
+        gen_identity += beam_identity/beam_size
+
+        gen_cdr_identity += beam_cdr_identity/beam_size
+        
+    return gen_identity, gen_cdr_identity
+
+def report_metric(metric_name, step, value, args, scores):
+    metric_str = '-'.join(['%s']*len(args)) + '_' + metric_name
+    metric_str = metric_str % args
+    scores[metric_str] = value
+    utils.wandb.log({metric_str: value}, step=step)
+    logger.info("%s -> %.6f" % (metric_str, value))
 
 def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
     """
@@ -536,7 +499,7 @@ def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
 
         for j in range(bs):
             words = []
-            for k in range(1, lengths[j]):
+            for k in range(0, lengths[j]):
                 if batch[k, j] == params.eos_index:
                     break
                 if batch[k, j] < 5 or batch[k, j] > 24:
@@ -550,23 +513,57 @@ def convert_to_text(batch, lengths, dico, params, mode='mt', map=None):
                     continue
             sentences[map[i]].append(dico[batch[i]])
 
-        sentences = [" ".join(words[1:-1]) for words in sentences]
+        sentences = [" ".join(words) for words in sentences]
     return sentences
 
+# def calculate_identity(aligner, ref, gen_result, lang2, w2, beam_size=1):
+#     gen_identity, gen_cdr_identity = 0, 0
+#     gen_cdr123_identity = {1:0,2:0,3:0}
+    
+#     for i in range(w2.shape[1]):
+#         beam_identity, beam_cdr_identity = 0, 0    
+#         for k in range(1, beam_size+1):
+#             gen_sent = gen_result[-(i*beam_size+k)].replace(" ", "")
+#             ref_sent = ref[-i].replace(" ", "")
+#             if len(gen_sent) == 0:
+#                 continue
+#             gen_alignment = aligner.align(ref_sent, gen_sent)[0]
 
-def eval_moses_bleu(ref, hyp):
-    """
-    Given a file of hypothesis and reference files,
-    evaluate the BLEU score using Moses scripts.
-    """
-    assert os.path.isfile(hyp)
-    assert os.path.isfile(ref) or os.path.isfile(ref + '0')
-    assert os.path.isfile(BLEU_SCRIPT_PATH)
-    command = BLEU_SCRIPT_PATH + ' %s < %s'
-    p = subprocess.Popen(command % (ref, hyp), stdout=subprocess.PIPE, shell=True)
-    result = p.communicate()[0].decode("utf-8")
-    if result.startswith('BLEU'):
-        return float(result[7:result.index(',')])
-    else:
-        logger.warning('Impossible to parse BLEU score! "%s"' % result)
-        return -1
+#             gen_matches = 0
+#             gen_index = 0
+#             gen_cdr_matches = 0
+#             cdr_number = 0
+#             cdr_flag = False
+#             gen_cdr123_matches = {1:0, 2:0, 3:0}
+#             gen_cdr123_len = {1:0, 2:0, 3:0}
+
+#             for j in range(len(gen_alignment[0])):
+#                 if len(gen_sent) > 0 and j < len(gen_alignment[0]):
+#                     gen_matches += 1 if gen_alignment[0][j] == gen_alignment[1][j] else 0
+#                     if lang2 == 'ab':
+#                         if w2[gen_index, -i] == 1 and not cdr_flag:
+#                             cdr_number += 1
+#                             cdr_flag = True
+#                         elif w2[gen_index, -i] == 0 and cdr_flag:
+#                             cdr_flag = False
+#                         if cdr_flag:
+#                             gen_cdr123_len[cdr_number] += 1
+#                             gen_cdr123_matches[cdr_number] += 1 if gen_alignment[0][j] == gen_alignment[1][j] else 0 
+
+#                         gen_cdr_matches += 1 if w2[gen_index, -i] == 1 and gen_alignment[0][j] == gen_alignment[1][j] else 0
+#                         if gen_alignment[0][j] != '-':
+#                             gen_index += 1
+            
+
+#             gen_matches /= len(ref_sent)
+
+#             gen_cdr_matches /= w2[:, -i].sum() - 1
+
+#             beam_identity += gen_matches
+#             beam_cdr_identity += gen_cdr_matches
+
+#         gen_identity += beam_identity/beam_size
+
+#         gen_cdr_identity += beam_cdr_identity/beam_size
+        
+#     return gen_identity, gen_cdr_identity

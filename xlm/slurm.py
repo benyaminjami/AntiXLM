@@ -12,6 +12,7 @@ import sys
 import torch
 import socket
 import signal
+import datetime
 import subprocess
 
 
@@ -95,12 +96,14 @@ def init_distributed_mode(params):
         params.world_size = int(os.environ.get('WORLD_SIZE', 1))
         params.n_gpu_per_node = params.world_size // params.n_nodes
 
+        params.node_master = (params.local_rank == 0)
+
         # define master address and master port
         hostnames = subprocess.check_output(['/opt/slurm/bin/scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
         params.master_addr = hostnames.split()[0].decode('utf-8')
         logger.info(PREFIX + "Master address: %s" % params.master_addr)
         logger.info(PREFIX + "Master port   : %i" % params.master_port)
-
+        params.reporter = params.node_master or params.global_rank < 8
         # set environment variables for 'env://'
         # os.environ['MASTER_ADDR'] = params.master_addr
         # os.environ['MASTER_PORT'] = str(params.master_port)
@@ -155,6 +158,7 @@ def init_distributed_mode(params):
     logger.info(PREFIX + "GPUs per node  : %i" % params.n_gpu_per_node)
     logger.info(PREFIX + "GPUs per node-T: %i" % torch.cuda.device_count())
     logger.info(PREFIX + "Master         : %s" % str(params.is_master))
+    logger.info(PREFIX + "Node Master    : %s" % str(params.node_master))
     logger.info(PREFIX + "Multi-node     : %s" % str(params.multi_node))
     logger.info(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
     logger.info(PREFIX + "Hostname       : %s" % socket.gethostname())
@@ -169,6 +173,7 @@ def init_distributed_mode(params):
     print(PREFIX + "GPUs per node  : %i" % params.n_gpu_per_node)
     print(PREFIX + "GPUs per node-T: %i" % torch.cuda.device_count())
     print(PREFIX + "Master         : %s" % str(params.is_master))
+    print(PREFIX + "Node Master    : %s" % str(params.node_master))
     print(PREFIX + "Multi-node     : %s" % str(params.multi_node))
     print(PREFIX + "Multi-GPU      : %s" % str(params.multi_gpu))
     print(PREFIX + "Hostname       : %s" % socket.gethostname())
@@ -195,6 +200,7 @@ def init_distributed_mode(params):
         logger.info("Initializing PyTorch distributed ...")
         torch.distributed.init_process_group(
             # init_method='env://',
-            backend='nccl'
+            backend='nccl',
+            timeout=datetime.timedelta(seconds=18000)
         )
         logger.info(PREFIX + "Initilized   ")

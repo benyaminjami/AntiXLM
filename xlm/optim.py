@@ -102,7 +102,7 @@ class AdamInverseSqrtWithWarmup(Adam):
         decay_factor = lr * sqrt(warmup_updates)
     """
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, warmup_updates=5000, warmup_init_lr=1e-7,
+                 weight_decay=0, warmup_updates=1000, warmup_init_lr=1e-7,
                  exp_factor=0.5, second_drop=15000):
         super().__init__(
             params,

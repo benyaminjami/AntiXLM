@@ -70,7 +70,7 @@ def create_sinusoidal_embeddings(n_pos, dim, out):
 
 
 def gelu(x):
-    """
+    """`
     GELU activation
     https://arxiv.org/abs/1606.08415
     https://github.com/huggingface/pytorch-openai-transformer-lm/blob/master/model_pytorch.py#L14
@@ -170,7 +170,7 @@ class MultiHeadAttention(nn.Module):
             self.out_lin = Linear(dim, dim)
         else:
             self.out_lin = nn.ModuleList()
-            for i in range(n_langs):
+            for _ in range(n_langs):
                 self.out_lin.append(Linear(dim, dim))
 
     def forward(self, input, mask, kv=None, cache=None, segment_label=None):
@@ -283,7 +283,12 @@ class TransformerModel(nn.Module):
         self.dim = params.emb_dim       # 512 by default
         self.hidden_dim = self.dim * 4  # 2048 by default
         self.n_heads = params.n_heads   # 8 by default
-        self.n_layers = params.n_layers
+        if params.n_layers:
+            self.n_layers = params.n_layers
+        elif is_encoder:
+            self.n_layers = params.n_enc_layers
+        else:
+            self.n_layers = params.n_dec_layers
         self.dropout = params.dropout
         self.attention_dropout = params.attention_dropout
         assert self.dim % self.n_heads == 0, 'transformer dim must be a multiple of n_heads'
@@ -308,9 +313,9 @@ class TransformerModel(nn.Module):
             self.encoder_attn = nn.ModuleList()
 
         for layer_id in range(self.n_layers):
-            self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             self.layer_norm1.append(nn.LayerNorm(self.dim, eps=1e-12))
             if self.is_decoder:
+                self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
                 self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
                 if self.lang_emb == "layer":
                     self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
@@ -320,6 +325,7 @@ class TransformerModel(nn.Module):
                     self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             else:
                 self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+                self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             
             
             self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout, gelu_activation=params.gelu_activation))
@@ -408,16 +414,16 @@ class TransformerModel(nn.Module):
             r_net = random.random()
             # self attention
             if self.is_decoder or bert_embed is None:
-                attn = self.attentions[i](tensor, attn_mask, cache=cache)
+                attn = self.attentions[i](tensor, attn_mask, cache=cache, segment_label=lang_id)
             else:
                 attn, bert_attn = 0, 0
                 if not self.training:
                     attn_coef, bert_attn_coef = 1, 1
                 elif r_net < self.drop_net/2:
-                    attn_coef = 2 - 1e-4
-                    bert_attn_coef = 1e-4
+                    attn_coef = 2 - 1e-5
+                    bert_attn_coef = 1e-5
                 elif r_net > 1 - self.drop_net/2:
-                    bert_attn_coef = 2 - 1e-4
+                    bert_attn_coef = 2 - 1e-5
                     attn_coef = 1e-4
                     
                 attn = self.attentions[i](tensor, attn_mask, cache=cache)
@@ -435,11 +441,11 @@ class TransformerModel(nn.Module):
                 if not self.training:
                     attn_coef, bert_attn_coef = 1, 1
                 elif r_net < self.drop_net/2 or bert_embed is None:
-                    attn_coef = 2 - 1e-4
-                    bert_attn_coef = 1e-4
+                    attn_coef = 2 - 1e-5
+                    bert_attn_coef = 1e-5
                 elif r_net > 1 - self.drop_net/2:
-                    bert_attn_coef = 2 - 1e-4
-                    attn_coef = 1e-4
+                    bert_attn_coef = 2 - 1e-5
+                    attn_coef = 1e-5
                     
                 attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache, segment_label=lang_id)
                 bert_attn = self.bert_attentions[i](tensor, src_mask, kv=bert_embed, cache=bert_cache, segment_label=lang_id)
@@ -546,7 +552,10 @@ class TransformerModel(nn.Module):
             if sample_temperature is None:
                 next_words = torch.topk(scores, 1)[1].squeeze(1)
             else:
-                next_words = torch.multinomial(F.softmax(scores / sample_temperature, dim=1), 1).squeeze(1)
+                top_words = torch.topk(scores, 1)[1].squeeze(1)
+                end_words = (top_words == self.eos_index).type(torch.uint8)
+                next_words = torch.multinomial(F.softmax(scores[:, 5:] / sample_temperature, dim=1), 1).squeeze(1)
+                next_words = (next_words + 5) * (1 - end_words) + self.eos_index * end_words
             assert next_words.size() == (bs,)
 
             # update generations / lengths / finished sentences / current length
@@ -625,11 +634,13 @@ class TransformerModel(nn.Module):
             generated.fill_(self.pad_index) 
             generated[:tgt_frw.shape[0],:,:] = tgt_frw.unsqueeze(2).expand(tgt_frw.shape[:1] + (bs, beam_size)).contiguous().clone().detach()
             beam_w = w.new(max_len, bs)
+            beam_w.fill_(0)
             if open_end:
-                beam_w.fill_(1)
+                beam_w[:tgt_frw.shape[0],:] = w.clone().detach()
+                beam_w = self.open_end_weight(beam_w)
             else:
-                beam_w.fill_(0)
-            beam_w[:tgt_frw.shape[0],:] = w.clone().detach()
+                beam_w[:tgt_frw.shape[0],:] = w.clone().detach()
+
             # beam_w = w.unsqueeze(2).expand(tgt_frw.shape[:1] + (bs, beam_size)).contiguous().view(tgt_frw.shape[:1] + (bs, beam_size,))
             # frw_shape = tgt_frw.shape[:1] + (bs, beam_size,)
         else:
@@ -720,14 +731,14 @@ class TransformerModel(nn.Module):
                     word_id = idx % n_words
 
                     # end of sentence, or next word
-                    if beam_w[cur_len, sent_id] == 1 and (word_id == self.eos_index or cur_len + 1 == max_len or (beam_w[cur_len+1:, sent_id].sum() <= 1)):
-                        generated_hyps[sent_id].add(generated[:cur_len, sent_id, beam_id].clone(), value.item())
-                        i -= 1
+                    if beam_w[cur_len, sent_id] == 1 and (word_id == self.eos_index or cur_len + 1 == max_len or (beam_w[cur_len+1:, sent_id].sum() == 0)):
+                        generated_hyps[sent_id].add(generated[:cur_len, sent_id, beam_id].clone().detach(), value.item())
                     else:
                         if beam_w[cur_len, sent_id] == 1:
                             next_sent_beam.append((value, word_id, sent_id, beam_id))
                         else:
                             next_sent_beam.append((beam_scores[sent_id, i], generated[cur_len, sent_id, i], sent_id, beam_id))
+                            i += 1
                     
                     # the beam for next step is full
                     if len(next_sent_beam) == beam_size:
@@ -771,8 +782,8 @@ class TransformerModel(nn.Module):
         best = []
 
         for i, hypotheses in enumerate(generated_hyps):
-            best_hyp = [x[1] for x in sorted(hypotheses.hyp, key=lambda x: x[0])]
-            tgt_len[i] = torch.tensor([len(x[1]) + 1 for x in sorted(hypotheses.hyp, key=lambda x: x[0])])
+            best_hyp = [x[1] for x in sorted(hypotheses.hyp, key=lambda x: x[0])[::-1]]
+            tgt_len[i] = torch.tensor([len(x[1]) + 1 for x in sorted(hypotheses.hyp, key=lambda x: x[0])[::-1]])
             best.append(best_hyp)
 
         # generate target batch
@@ -788,6 +799,19 @@ class TransformerModel(nn.Module):
 
         return decoded.view(-1, bs * beam_size), tgt_len.view(-1)
 
+    def open_end_weight(self, beam_w):
+        for i in range(beam_w.shape[1]):
+            flag = False
+            j = 1
+            while True:
+                if not flag and beam_w[-j, i] == 0:
+                    beam_w[-j, i] = 1
+                elif not flag and beam_w[-j, i] == 1:
+                    flag = True
+                elif flag and beam_w[-j, i] == 1:
+                    break
+                j+=1
+        return beam_w
 
 class BeamHypotheses(object):
 
@@ -813,7 +837,10 @@ class BeamHypotheses(object):
         Add a new hypothesis to the list.
         """
         score = sum_logprobs / len(hyp) ** self.length_penalty
+        # if hyp[-1] == 0:
+        #     return
         if len(self) < self.n_hyp or score > self.worst_score:
+        
             self.hyp.append((score, hyp))
             if len(self) > self.n_hyp:
                 sorted_scores = sorted([(s, idx) for idx, (s, _) in enumerate(self.hyp)])

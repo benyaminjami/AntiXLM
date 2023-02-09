@@ -11,12 +11,12 @@ import wandb
 import argparse
 import xlm.utils as utils
 import sys
+import torch
 
 from xlm.slurm import init_signal_handler, init_distributed_mode
 from xlm.data.loader import check_data_params, load_data
 from xlm.utils import bool_flag, initialize_exp, set_sampling_probs, shuf_order
 from xlm.model import check_model_params, build_model
-# from xlm.model.memory import HashingMemory
 from xlm.trainer import SingleTrainer, EncDecTrainer
 from xlm.evaluation.evaluator import SingleEvaluator, EncDecEvaluator
 
@@ -53,8 +53,14 @@ def get_parser():
     # model parameters
     parser.add_argument("--emb_dim", type=int, default=512,
                         help="Embedding layer size")
-    parser.add_argument("--n_layers", type=int, default=4,
+    
+    parser.add_argument("--n_layers", type=int, default=None,
                         help="Number of Transformer layers")
+    parser.add_argument("--n_enc_layers", type=int, default=4,
+                        help="Number of Transformer layers for Encoder")
+    parser.add_argument("--n_dec_layers", type=int, default=4,
+                        help="Number of Transformer layers for Decoder")
+    
     parser.add_argument("--n_heads", type=int, default=8,
                         help="Number of Transformer heads")
     parser.add_argument("--dropout", type=float, default=0.1,
@@ -77,12 +83,6 @@ def get_parser():
     # memory parameters
     parser.add_argument("--use_memory", type=bool_flag, default=False,
                         help="Use an external memory")
-    # if parser.parse_known_args()[0].use_memory:
-    #     HashingMemory.register_args(parser)
-    #     parser.add_argument("--mem_enc_positions", type=str, default="",
-    #                         help="Memory positions in the encoder ('4' for inside layer 4, '7,10+' for inside layer 7 and after layer 10)")
-    #     parser.add_argument("--mem_dec_positions", type=str, default="",
-    #                         help="Memory positions in the decoder. Same syntax as `mem_enc_positions`.")
 
     # adaptive softmax
     parser.add_argument("--asm", type=bool_flag, default=False,
@@ -126,7 +126,7 @@ def get_parser():
                         help="Language sampling factor")
     parser.add_argument("--skip_fw", type=bool_flag, default=False,
                         help="Training on Frameworks or not")
-    parser.add_argument("--cdr_weight", type=int, default=3, 
+    parser.add_argument("--cdr_weight", type=int, default=2, 
                         help="Weight that the cdr losses will be multipled with")
 
     # batch parameters
@@ -158,7 +158,7 @@ def get_parser():
                         help="Stopping criterion, and number of non-increase before stopping the experiment")
     parser.add_argument("--validation_metrics", type=str, default="",
                         help="Validation metrics")
-    parser.add_argument("--accumulate_gradients", type=int, default=1,
+    parser.add_argument("--accumulate_gradients", type=int, default=2,
                         help="Accumulate model gradients over N iterations (N times larger batch sizes)")
 
     # training coefficients
@@ -269,6 +269,14 @@ def main(params):
         for k, v in scores.items():
             logger.info("%s -> %.6f" % (k, v))
         logger.info("__log__:%s" % json.dumps(scores))
+        for k, v in scores.items():
+            logger.info("%s -> %.6f" % (k, v))
+        for k in scores:
+            utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
+            utils.wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
+
+        if params.is_master:
+            logger.info("__log__:%s" % json.dumps(scores))
         exit()
 
     # set sampling probabilities for training
@@ -276,51 +284,47 @@ def main(params):
 
     # language model training
     for _ in range(params.max_epoch):
-
         logger.info("============ Starting epoch %i ... ============" % trainer.epoch)
 
         trainer.n_sentences = 0
 
         while trainer.n_sentences < trainer.epoch_size:
-
-            # # MLM steps (also includes TLM if lang2 is not None)
-            # for lang1, lang2 in shuf_order(params.mlm_steps, params):
-            #     trainer.mlm_step(lang1, lang2, params.lambda_mlm)
-
             # denoising auto-encoder steps
-            if trainer.n_total_iter > params.mt_steps_warmup:
+            if trainer.n_total_iter >= params.mt_steps_warmup:
                 for lang in shuf_order(params.ae_steps):
                     trainer.mt_step(lang, lang, params.lambda_ae)
             
+            # machine translation steps
             if params.mt_steps_ratio != 0:
                 if trainer.n_total_iter % params.mt_steps_ratio == 0 or trainer.n_total_iter < params.mt_steps_warmup:
-                    # machine translation steps
-                    for lang1, lang2 in shuf_order(params.mt_steps, params):
+                    for (lang1, lang2) in shuf_order(params.mt_steps):
                         trainer.mt_step(lang1, lang2, params.lambda_mt)
-
+            
             # back-translation steps
-            if trainer.n_total_iter > params.mt_steps_warmup:
-                for lang1, lang2, lang3 in shuf_order(params.bt_steps):
-                    trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
-
+            if trainer.n_total_iter >= params.mt_steps_warmup:
+                for i, (lang1, lang2, lang3) in enumerate(shuf_order(params.bt_steps)):
+                    trainer.bt_step(lang1, lang2, lang3, params.lambda_bt, i==1)
+            
+            # logger.warning('END of Iteration')
             trainer.iter()
             trainer.save_periodic()
-            
-
+        
         logger.info("============ End of epoch %i ============" % trainer.epoch)
+        
+        if params.multi_gpu:
+            torch.distributed.barrier()
 
         # evaluate perplexity
-        
         scores = evaluator.run_all_evals(trainer)
 
         # print / JSON log
-        if params.global_rank % params.n_gpu_per_node == 0:
+        if params.reporter:
                 
             for k, v in scores.items():
                 logger.info("%s -> %.6f" % (k, v))
             for k in scores:
                 utils.board_writer.add_scalar(str(k), float(scores[k]), trainer.n_total_iter)
-                wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
+                utils.wandb.log({str(k): float(scores[k])}, step=trainer.n_total_iter)
 
             if params.is_master:
                 logger.info("__log__:%s" % json.dumps(scores))
@@ -329,6 +333,9 @@ def main(params):
         trainer.save_best_model(scores)
         trainer.save_periodic()
         trainer.end_epoch(scores)
+        if params.multi_gpu:
+            torch.distributed.barrier()
+
 
 
 if __name__ == '__main__':
@@ -336,12 +343,12 @@ if __name__ == '__main__':
     parser = get_parser()
     params = parser.parse_args()
 
-    # debug mode
-    if params.debug:
-        params.exp_name = 'debug'
-        params.exp_id = 'debug_%08i' % random.randint(0, 100000000)
-        params.debug_slurm = True
-        params.debug_train = True
+    # # debug mode
+    # if params.debug:
+    #     params.exp_name = 'debug'
+    #     params.exp_id = 'debug_%08i' % random.randint(0, 100000000)
+    #     params.debug_slurm = True
+    #     params.debug_train = True
 
     # check parameters
     check_data_params(params)

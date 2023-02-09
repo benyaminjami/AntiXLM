@@ -6,6 +6,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+DeepAb/
+dumped/
+dumped_test/
+slurm_logs/
+evaluation/
+hypotheses/
+bin/
+codegpt
+analysis.ipynb
+antigen.py
+
+*_test.py
+
 
 # C extensions
 *.so
@@ -37,7 +50,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+slurm_logs/
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.

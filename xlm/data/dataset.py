@@ -91,7 +91,7 @@ class Dataset(object):
         self.weights = weights
         self.lengths = self.pos[:, 1] - self.pos[:, 0]
 
-        if self.weights is not None and not params.skip_fw:
+        if self.weights is not None:
             self.weights = self.weights * (params.cdr_weight - 1)
             self.weights = self.weights + 1
 
@@ -135,7 +135,7 @@ class Dataset(object):
                 sent[1:lengths[i] - 1, i].copy_(torch.from_numpy(s.astype(np.int64)))
                 if w is not None:
                     weights[1:lengths[i] - 1, i].copy_(torch.from_numpy(w[i].astype(np.int64)))
-            weights[lengths[i] - 1, i] = 1
+            weights[lengths[i] - 1, i] = weights[:, i].max()
             sent[lengths[i] - 1, i] = self.eos_index
 
         if w is not None:
@@ -201,10 +201,12 @@ class Dataset(object):
                 sentence_ids = sentence_ids[:self.max_batch_size]
             pos = self.pos[sentence_ids]
             sent = [self.sent[a:b] for a, b in pos]
+
             if self.weights is not None:
                 weights = [self.weights[a:b] for a, b in pos]
             else:
                 weights = [np.ones_like(s) for s in sent]
+
             sent = self.batch_sentences(sent, weights)
             yield (sent, sentence_ids) if return_indices else sent
 
@@ -263,7 +265,7 @@ class ParallelDataset(Dataset):
         self.bos_index = params.bos_index
         self.pad_index = params.pad_index
         self.batch_size = params.batch_size
-        self.tokens_per_batch = params.tokens_per_batch // params.beam_size
+        self.tokens_per_batch = (params.tokens_per_batch)
         self.max_batch_size = params.max_batch_size
 
         self.sent1 = sent1
@@ -370,9 +372,7 @@ class ParallelDataset(Dataset):
         assert type(return_indices) is bool
 
         for sentence_ids in batches:
-            if 0 < self.max_batch_size < len(sentence_ids):
-                np.random.shuffle(sentence_ids)
-                sentence_ids = sentence_ids[:self.max_batch_size]
+            
             pos1 = self.pos1[sentence_ids]
             pos2 = self.pos2[sentence_ids]
             sent1 = [self.sent1[a:b] for a, b in pos1]
@@ -391,7 +391,7 @@ class ParallelDataset(Dataset):
 
             yield (sent1, sent2, sentence_ids) if return_indices else (sent1, sent2)
 
-    def get_iterator(self, shuffle, group_by_size=False, n_sentences=-1, return_indices=False):
+    def get_iterator(self, shuffle, group_by_size=False, n_sentences=-1, return_indices=False, beam_size=1):
         """
         Return a sentences iterator.
         """
@@ -416,7 +416,7 @@ class ParallelDataset(Dataset):
         if self.tokens_per_batch == -1:
             batches = np.array_split(indices, math.ceil(len(indices) * 1. / self.batch_size))
         else:
-            batch_ids = np.cumsum(lengths[indices]) // self.tokens_per_batch
+            batch_ids = np.cumsum(lengths[indices]) // ((self.tokens_per_batch//beam_size))
             _, bounds = np.unique(batch_ids, return_index=True)
             batches = [indices[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1)]
             if bounds[-1] < len(indices):

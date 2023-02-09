@@ -4,6 +4,8 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+
+    
     
         
 
@@ -19,7 +21,51 @@
             ]
         }
     ,
+    {
+        "name": "Python: dock",
+        "type": "python",
+        "request": "launch",
+        "program": "/h/benjami/AntiXLM/dock_test.py",
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "args": [
+        ]
+    }
+    ,
+    {
+        "name": "Python: evaluation",
+        "type": "python",
+        "request": "launch",
+        "program": "/h/benjami/AntiXLM/design_for_testset.py",
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "args": [
+        ]
+    }
+    ,
+    {
+        "name": "Python: energy",
+        "type": "python",
+        "request": "launch",
+        "program": "/h/benjami/AntiXLM/calculate_energy_for_test.py",
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "args": [
+        ]
+    }
+    ,
 
+    {
+        "name": "Python: predict_structure",
+        "type": "python",
+        "request": "launch",
+        "program": "/h/benjami/AntiXLM/predict_structure_for_test.py",
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "args": [
+        ]
+    }
+    ,
     
         {
             "name": "Python: train.py",
@@ -33,8 +79,8 @@
               },
             "args": [
                 "--cuda", "True",
-                // "--amp", "1",
                 "--debug_train", "True",
+                // "--eval_only", "True",
                 "--exp_name", "unsupMT_agab",
                 "--dump_path", "./dumped_test/",
                 "--data_path", "./data/",
@@ -42,7 +88,7 @@
                 "--ae_steps", "ab,ag",
                 "--bt_steps", "ab-ag-ab,ag-ab-ag",
                 "--mt_steps", "ag-ab,ab-ag",
-                "--mt_steps_ratio", "25",
+                "--mt_steps_ratio", "50",
                 "--mt_steps_warmup", "0",
                 "--word_shuffle", "3",
                 "--word_dropout", "0.1",
@@ -51,17 +97,17 @@
                 "--max_len", "160,250" ,
                 "--encoder_only", "false" ,
                 "--emb_dim", "1024" ,
-                "--n_layers", "4" ,
+                "--n_layers", "6" ,
                 "--n_heads", "8" ,
                 "--dropout", "0.1",
                 "--attention_dropout", "0.1" ,
                 "--gelu_activation", "true" ,
-                "--tokens_per_batch", "1000" ,
+                "--tokens_per_batch", "200" ,
                 "--batch_size", "128" ,
                 "--optimizer", "adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.001",
-                "--epoch_size", "1000",
+                "--epoch_size", "10000",
                 "--eval_bleu", "true",
-                "--beam_size", "5", 
+                "--beam_size", "10", 
                 "--stopping_criterion", "valid_ag-ab_mt_bleu,10",
                 "--validation_metrics", "valid_ag-ab_mt_bleu",
                 "--master_port", "-1",
