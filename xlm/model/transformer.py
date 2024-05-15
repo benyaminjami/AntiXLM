@@ -283,7 +283,7 @@ class TransformerModel(nn.Module):
         self.dim = params.emb_dim       # 512 by default
         self.hidden_dim = self.dim * 4  # 2048 by default
         self.n_heads = params.n_heads   # 8 by default
-        if params.n_layers:
+        if params.__dict__.get('n_layers', None):
             self.n_layers = params.n_layers
         elif is_encoder:
             self.n_layers = params.n_enc_layers
@@ -319,13 +319,16 @@ class TransformerModel(nn.Module):
                 self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
                 if self.lang_emb == "layer":
                     self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
-                    self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
+                    if params.fused_bert:
+                        self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout, n_langs=self.n_langs))
                 else:
                     self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
-                    self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+                    if params.fused_bert:
+                        self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             else:
-                self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
                 self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
+                if params.fused_bert:
+                    self.bert_attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             
             
             self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout, gelu_activation=params.gelu_activation))
@@ -346,10 +349,28 @@ class TransformerModel(nn.Module):
             return self.fwd(**kwargs)
         elif mode == 'predict':
             return self.predict(**kwargs)
+        elif mode == 'batch_fwd':
+            x = kwargs['x']
+            batch_size = 100
+            n_batch = max(x.shape[1] // batch_size, 1)
+            result = []
+            for i in range(n_batch):
+                result.append(self.fwd(x=kwargs['x'][:,i*batch_size:(i+1)*batch_size],
+                                    lengths=kwargs['lengths'][i*batch_size:(i+1)*batch_size],
+                                    positions=kwargs['positions'][:,i*batch_size:(i+1)*batch_size],
+                                    langs=kwargs['langs'][:,i*batch_size:(i+1)*batch_size],
+                                    causal=True,
+                                    src_enc=kwargs['src_enc'][i*batch_size:(i+1)*batch_size,:,:],
+                                    src_len=kwargs['src_len'][i*batch_size:(i+1)*batch_size],
+                                    # cache=kwargs['cache'],
+                                    # bert_cache=kwargs['bert_cache'],
+                                    bert_embed=kwargs['bert_embed'][i*batch_size:(i+1)*batch_size,:,:]))
+            return torch.cat(result, dim=1)
         else:
             raise Exception("Unknown mode: %s" % mode)
 
-    def fwd(self, x, lengths, causal, bert_embed=None, src_enc=None, src_len=None, positions=None, langs=None, cache=None, bert_cache=None):
+    def fwd(self, x, lengths, causal, bert_embed=None, src_enc=None, src_len=None, positions=None, langs=None, cache=None, bert_cache=None,
+           embed_x=None):
         """
         Inputs:
             `x` LongTensor(slen, bs), containing word indices
@@ -401,6 +422,8 @@ class TransformerModel(nn.Module):
 
         # embeddings
         tensor = self.embeddings(x)
+        if embed_x is not None:
+            tensor = embed_x
         tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
         if langs is not None and self.lang_emb == 'emb':
             tensor = tensor + self.lang_embeddings(langs)
@@ -448,7 +471,8 @@ class TransformerModel(nn.Module):
                     attn_coef = 1e-5
                     
                 attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache, segment_label=lang_id)
-                bert_attn = self.bert_attentions[i](tensor, src_mask, kv=bert_embed, cache=bert_cache, segment_label=lang_id)
+                if bert_embed != None:
+                    bert_attn = self.bert_attentions[i](tensor, src_mask, kv=bert_embed, cache=bert_cache, segment_label=lang_id)
                     
                 attn = 0.5*attn_coef*attn + 0.5*bert_attn_coef*bert_attn
                 
@@ -484,7 +508,7 @@ class TransformerModel(nn.Module):
         scores, loss = self.pred_layer(masked_tensor, y, weights, get_scores)
         return scores, loss
 
-    def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None, bert_embed=None):
+    def generate(self, src_enc, src_len, tgt_lang_id, sampling_method='B', sampling_param=5, max_len=200, bert_embed=None):
         """
         Decode a sentence given initial start.
         `x`:
@@ -500,8 +524,15 @@ class TransformerModel(nn.Module):
             - must be None if the model only supports one language
             - lang_id if only one language is involved (LM)
             - (lang_id1, lang_id2) if two languages are involved (MT)
+        `sampling_method`:
+            - G: Greedy
+            - B: Beam sampling -> sampling_param: Beam size
+            - T: Tempreture sampling -> sampling_param: tempreture
         """
 
+        if sampling_method == 'B':
+            return self.generate_beam(src_enc, src_len, tgt_lang_id, beam_size=sampling_param, length_penalty=0, early_stopping=True, max_len=max_len)
+        
         # input batch
         bs = len(src_len)
         assert src_enc.size(0) == bs
@@ -549,13 +580,11 @@ class TransformerModel(nn.Module):
             scores = self.pred_layer.get_scores(tensor)      # (bs, n_words)
 
             # select next words: sample or greedy
-            if sample_temperature is None:
+            if sampling_method == 'G':
                 next_words = torch.topk(scores, 1)[1].squeeze(1)
-            else:
-                top_words = torch.topk(scores, 1)[1].squeeze(1)
-                end_words = (top_words == self.eos_index).type(torch.uint8)
-                next_words = torch.multinomial(F.softmax(scores[:, 5:] / sample_temperature, dim=1), 1).squeeze(1)
-                next_words = (next_words + 5) * (1 - end_words) + self.eos_index * end_words
+            elif sampling_method == 'T':
+                next_words = torch.multinomial(F.softmax(scores / sampling_param, dim=1), 1).squeeze(1)
+
             assert next_words.size() == (bs,)
 
             # update generations / lengths / finished sentences / current length
@@ -578,7 +607,194 @@ class TransformerModel(nn.Module):
         
         return generated[:cur_len], gen_len
 
-    def generate_beam(self,
+    def generate_beam(self, src_enc, src_len, tgt_lang_id, beam_size, length_penalty, early_stopping, max_len=200, bert_embed=None, cdr_generation=False, tgt_frw=None, w=None):
+
+        """
+        Decode a sentence given initial start.
+        `x`:
+            - LongTensor(bs, slen)
+                <EOS> W1 W2 W3 <EOS> <PAD>
+                <EOS> W1 W2 W3   W4  <EOS>
+        `lengths`:
+            - LongTensor(bs) [5, 6]
+        `positions`:
+            - False, for regular "arange" positions (LM)
+            - True, to reset positions from the new generation (MT)
+        `langs`:
+            - must be None if the model only supports one language
+            - lang_id if only one language is involved (LM)
+            - (lang_id1, lang_id2) if two languages are involved (MT)
+        """
+
+        # check inputs
+        assert src_enc.size(0) == src_len.size(0)
+        assert beam_size >= 1
+
+        # batch size / number of words
+        bs = len(src_len) 
+        n_words = self.n_words
+
+        # expand to beam size the source latent representations / source lengths
+        if bert_embed != None:
+            bert_embed = bert_embed.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
+        src_enc = src_enc.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
+        src_len = src_len.unsqueeze(1).expand(bs, beam_size).contiguous().view(-1)
+
+        use_cache = not cdr_generation
+        if cdr_generation:
+            generated = src_len.new(max_len, bs, beam_size)  # upcoming output
+            generated.fill_(self.pad_index) 
+            generated[:tgt_frw.shape[0],:,:] = tgt_frw.unsqueeze(2).expand(tgt_frw.shape[:1] + (bs, beam_size)).contiguous().clone().detach()
+            beam_w = w.new(max_len, bs)
+            beam_w.fill_(0)
+            beam_w[:tgt_frw.shape[0],:] = w.clone().detach()
+        else:
+            generated = src_len.new(max_len, bs * beam_size)  # upcoming output
+            generated.fill_(self.pad_index)                   # fill upcoming ouput with <PAD>
+            generated[0].fill_(self.bos_index)                
+            beam_w = src_len.new(max_len, bs)
+            beam_w.fill_(1)
+
+
+        # generated hypotheses
+        generated_hyps = [BeamHypotheses(beam_size, max_len, length_penalty, early_stopping) for _ in range(bs)]
+
+        # positions
+        positions = src_len.new(max_len).long()
+        positions = torch.arange(max_len, out=positions).unsqueeze(1).expand_as(generated)
+
+        # language IDs
+        langs = positions.clone().fill_(tgt_lang_id)
+
+        # scores for each sentence in the beam
+        beam_scores = src_enc.new(bs, beam_size).fill_(0)
+        beam_scores[:, 1:] = -1e9
+        beam_scores = beam_scores.view(-1)
+
+        # current position
+        cur_len = 1
+
+        # cache compute states
+        cache, bert_cache = None, None
+        if use_cache:
+            # cache compute states
+            cache = {'slen': 0}
+            bert_cache = {'slen': 0}
+
+        # done sentences
+        done = [False for _ in range(bs)]
+
+        while cur_len < max_len:
+            # compute word scores
+            tensor = self.forward(
+                'fwd',
+                x=generated[:cur_len],
+                lengths=src_len.new(bs * beam_size).fill_(cur_len),
+                positions=positions[:cur_len],
+                langs=langs[:cur_len],
+                causal=True,
+                src_enc=src_enc,
+                src_len=src_len,
+                cache=cache,
+                bert_cache=bert_cache,
+                bert_embed=bert_embed
+            )
+            assert tensor.size() == (1, bs * beam_size, self.dim)
+            tensor = tensor.data[-1, :, :]               # (bs * beam_size, dim)
+            scores = self.pred_layer.get_scores(tensor)  # (bs * beam_size, n_words)
+            scores = F.log_softmax(scores, dim=-1)       # (bs * beam_size, n_words)
+            assert scores.size() == (bs * beam_size, n_words)
+
+            # select next words with scores
+            _scores = scores + beam_scores[:, None].expand_as(scores)  # (bs * beam_size, n_words)
+            _scores = _scores.view(bs, beam_size * n_words)            # (bs, beam_size * n_words)
+
+            next_scores, next_words = torch.topk(_scores, 2 * beam_size, dim=1, largest=True, sorted=True)
+            assert next_scores.size() == next_words.size() == (bs, 2 * beam_size)
+
+            # next batch beam content
+            # list of (bs * beam_size) tuple(next hypothesis score, next word, current position in the batch)
+            next_batch_beam = []
+
+            # for each sentence
+            for sent_id in range(bs):
+
+                # if we are done with this sentence
+                done[sent_id] = done[sent_id] or generated_hyps[sent_id].is_done(next_scores[sent_id].max().item())
+                if done[sent_id]:
+                    next_batch_beam.extend([(0, self.pad_index, 0)] * beam_size)  # pad the batch
+                    continue
+
+                # next sentence beam content
+                next_sent_beam = []
+
+                # next words for this sentence
+                for idx, value in zip(next_words[sent_id], next_scores[sent_id]):
+
+                    # get beam and word IDs
+                    beam_id = idx // n_words
+                    word_id = idx % n_words
+
+                    # end of sentence, or next word
+                    if word_id == self.eos_index or cur_len + 1 == max_len:
+                        generated_hyps[sent_id].add(generated[:cur_len, sent_id * beam_size + beam_id].clone(), value.item())
+                    else:
+                        next_sent_beam.append((value, word_id, sent_id * beam_size + beam_id))
+
+                    # the beam for next step is full
+                    if len(next_sent_beam) == beam_size:
+                        break
+
+                # update next beam content
+                assert len(next_sent_beam) == 0 if cur_len + 1 == max_len else beam_size
+                if len(next_sent_beam) == 0:
+                    next_sent_beam = [(0, self.pad_index, 0)] * beam_size  # pad the batch
+                next_batch_beam.extend(next_sent_beam)
+                assert len(next_batch_beam) == beam_size * (sent_id + 1)
+
+            # sanity check / prepare next batch
+            assert len(next_batch_beam) == bs * beam_size
+            beam_scores = beam_scores.new([x[0] for x in next_batch_beam])
+            beam_words = generated.new([x[1] for x in next_batch_beam])
+            beam_idx = src_len.new([x[2] for x in next_batch_beam])
+
+            # re-order batch and internal states
+            generated = generated[:, beam_idx]
+            generated[cur_len] = beam_words
+            for k in cache.keys():
+                if k != 'slen':
+                    cache[k] = (cache[k][0][beam_idx], cache[k][1][beam_idx])
+
+            # update current length
+            cur_len = cur_len + 1
+
+            # stop when we are done with each sentence
+            if all(done):
+                break
+
+        # select the best hypotheses
+        tgt_len = src_len.new(bs)
+        best = []
+
+        for i, hypotheses in enumerate(generated_hyps):
+            best_hyp = max(hypotheses.hyp, key=lambda x: x[0])[1]
+            tgt_len[i] = len(best_hyp) + 1  # +1 for the <EOS> symbol
+            best.append(best_hyp)
+
+        # generate target batch
+        decoded = src_len.new(tgt_len.max().item(), bs).fill_(self.pad_index)
+        for i, hypo in enumerate(best):
+            decoded[:tgt_len[i] - 1, i] = hypo
+            decoded[tgt_len[i] - 1, i] = self.eos_index
+
+        # sanity check
+        assert (decoded == self.eos_index).sum() == bs
+        # assert (decoded == self.bos_index).sum() == bs
+        return decoded, tgt_len
+
+
+
+    def generate_beam_eval(self,
                     src_enc,
                     src_len, 
                     tgt_lang_id, 
@@ -590,7 +806,8 @@ class TransformerModel(nn.Module):
                     cdr_generation=False,
                     tgt_frw=None,
                     w=None,
-                    open_end=False):
+                    open_end=False,
+                    difference_penalty=0):
         """
         Decode a sentence given initial start.
         `x`:
@@ -615,7 +832,8 @@ class TransformerModel(nn.Module):
         # batch size / number of words
         bs = len(src_len)
         n_words = self.n_words
-
+        beam_size *= 2
+        
         # expand to beam size the source latent representations / source lengths
         bert_embed = bert_embed.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
         src_enc = src_enc.unsqueeze(1).expand((bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
@@ -646,7 +864,7 @@ class TransformerModel(nn.Module):
         else:
             generated = src_len.new(max_len, bs, beam_size)  # upcoming output
             generated.fill_(self.pad_index)                   # fill upcoming ouput with <PAD>
-            generated[0].fill_(self.bos_index)                # we use <EOS> for <BOS> everywhere
+            generated[0].fill_(self.bos_index)                
             beam_w = src_len.new(max_len, bs)
             beam_w.fill_(1)
 
@@ -676,13 +894,15 @@ class TransformerModel(nn.Module):
         cdr = [0 for _ in range(bs)]
 
         while cur_len < max_len:
+
             if  (beam_w[cur_len, :] == 0).all():
                 # update current length
                 cur_len = cur_len + 1
                 continue
+
             # compute word scores
             tensor = self.forward(
-                'fwd',
+                'batch_fwd',
                 x=generated[:cur_len].view(-1, beam_search_dim),
                 lengths=src_len.new(bs * beam_size).fill_(cur_len),
                 positions=positions[:cur_len],
@@ -690,13 +910,14 @@ class TransformerModel(nn.Module):
                 causal=True,
                 src_enc=src_enc,
                 src_len=src_len,
-                cache=cache,
-                bert_cache=bert_cache,
+                # cache=cache,
+                # bert_cache=bert_cache,
                 bert_embed=bert_embed
             )
             tensor = tensor.data[-1, :, :]               # (bs * beam_size, dim)
             scores = self.pred_layer.get_scores(tensor)  # (bs * beam_size, n_words)
             scores = F.log_softmax(scores, dim=-1)      # (bs * beam_size, n_words)
+            scores[:, torch.arange(30).cuda() != tgt_frw[cur_len]] += difference_penalty
             assert scores.size() == (bs * beam_size, n_words)
             scores = scores.view((bs, beam_size, n_words))
 
@@ -731,14 +952,15 @@ class TransformerModel(nn.Module):
                     word_id = idx % n_words
 
                     # end of sentence, or next word
-                    if beam_w[cur_len, sent_id] == 1 and (word_id == self.eos_index or cur_len + 1 == max_len or (beam_w[cur_len+1:, sent_id].sum() == 0)):
-                        generated_hyps[sent_id].add(generated[:cur_len, sent_id, beam_id].clone().detach(), value.item())
+                    # if beam_w[cur_len, sent_id] == 1 and (cur_len + 1 == max_len or (beam_w[cur_len+1:, sent_id].sum() == 0)):
+                    #     generated_hyps[sent_id].add(generated[:cur_len, sent_id, beam_id].clone().detach(), value.item())
+                    if word_id < 5:
+                        continue
+                    if beam_w[cur_len, sent_id] == 1:
+                        next_sent_beam.append((value, word_id, sent_id, beam_id))
                     else:
-                        if beam_w[cur_len, sent_id] == 1:
-                            next_sent_beam.append((value, word_id, sent_id, beam_id))
-                        else:
-                            next_sent_beam.append((beam_scores[sent_id, i], generated[cur_len, sent_id, i], sent_id, beam_id))
-                            i += 1
+                        next_sent_beam.append((beam_scores[sent_id, i], generated[cur_len, sent_id, i], sent_id, beam_id))
+                        i += 1
                     
                     # the beam for next step is full
                     if len(next_sent_beam) == beam_size:
@@ -770,19 +992,29 @@ class TransformerModel(nn.Module):
                     if k != 'slen':
                         bert_cache[k] = (bert_cache[k][0][beam_idx], bert_cache[k][1][beam_idx])
 
+            if beam_w[cur_len+1:, :].sum() == 0:
+                beam_scores = self.refine_scores(generated, beam_scores, cur_len+1, len(w), 
+                                                            src_len, beam_size, positions, langs, src_enc, cache, bert_cache, bert_embed,
+                                                            n_words, beam_search_dim, tgt_frw)
+                for sent_id in range(bs):
+                    for beam_id in range(beam_size):
+                        generated_hyps[sent_id].add(generated[:len(w)-1, sent_id, beam_id].clone().detach(), beam_scores[sent_id, beam_id])    
+        
             # update current length
             cur_len = cur_len + 1
-
+        
             # stop when we are done with each sentence
             if all(done):
                 break
-
+        
+        beam_size = beam_size
         # select the best hypotheses
         tgt_len = src_len.new(bs, beam_size)
         best = []
 
         for i, hypotheses in enumerate(generated_hyps):
             best_hyp = [x[1] for x in sorted(hypotheses.hyp, key=lambda x: x[0])[::-1]]
+            scores = [x[0].item() for x in sorted(hypotheses.hyp, key=lambda x: x[0])[::-1]]
             tgt_len[i] = torch.tensor([len(x[1]) + 1 for x in sorted(hypotheses.hyp, key=lambda x: x[0])[::-1]])
             best.append(best_hyp)
 
@@ -797,8 +1029,35 @@ class TransformerModel(nn.Module):
         assert (decoded[0] == self.bos_index).sum() == bs * beam_size
         assert (decoded == self.eos_index).sum() == bs * beam_size
 
-        return decoded.view(-1, bs * beam_size), tgt_len.view(-1)
+        return decoded.view(-1, bs * beam_size)[:, :beam_size//2], tgt_len.view(-1)[:beam_size//2], scores[:beam_size//2]
 
+    def refine_scores(self, generated, beam_scores, cur_len, tgt_len, src_len, beam_size, positions, langs,
+                        src_enc, cache, bert_cache, bert_embed, n_words, beam_search_dim, tgt_frw):
+        while cur_len < tgt_len:
+            # compute word scores
+            tensor = self.forward(
+                'batch_fwd',
+                x=generated[:cur_len].view(-1, beam_search_dim),
+                lengths=src_len.new(1 * beam_size).fill_(cur_len),
+                positions=positions[:cur_len],
+                langs=langs[:cur_len],
+                causal=True,
+                src_enc=src_enc,
+                src_len=src_len,
+                cache=cache,
+                bert_cache=bert_cache,
+                bert_embed=bert_embed
+            )
+            tensor = tensor.data[-1, :, :]               # (bs * beam_size, dim)
+            scores = self.pred_layer.get_scores(tensor)  # (bs * beam_size, n_words)
+            scores = F.log_softmax(scores, dim=-1)      # (bs * beam_size, n_words)
+            assert scores.size() == (1 * beam_size, n_words)
+            scores = scores.view((1, beam_size, n_words))
+            beam_scores += scores[0,:,tgt_frw[cur_len]].view((1, beam_size))
+            cur_len += 1
+        return beam_scores
+    
+    
     def open_end_weight(self, beam_w):
         for i in range(beam_w.shape[1]):
             flag = False

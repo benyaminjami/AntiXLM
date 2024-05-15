@@ -5,12 +5,12 @@
 
 ### e.g. request 4 nodes with 1 gpu each, totally 4 gpus (WORLD_SIZE==4)
 ### Note: --gres=gpu:x should equal to ntasks-per-node
-#SBATCH --nodes=4 
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=100GB
+#SBATCH --mem=140GB
 #SBATCH --gres=gpu:4
 #SBATCH --partition=a40#,rtx6000#,t4v2
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=8
 #SBATCH --hint=nomultithread
 #SBATCH --output=slurm_logs/%j.out
 #SBATCH --error=slurm_logs/%j.err
@@ -34,7 +34,7 @@ echo "MASTER_ADDR="$MASTER_ADDR
 # if [[ -f /checkpoint/benjami/${SLURM_JOB_ID}/unsupMT_agab/0/checkpoint.pth ]]; then
 #     echo exist
 # else
-#     cp -r /checkpoint/benjami/8988431/unsupMT_agab/ /checkpoint/benjami/${SLURM_JOB_ID}/
+#     cp -r /checkpoint/benjami/9086550/unsupMT_agab/ /checkpoint/benjami/${SLURM_JOB_ID}/
 # fi
 
 # ln -sfn /checkpoint/${USER}/${SLURM_JOB_ID} $PWD/checkpoint/${SLURM_JOB_ID}
@@ -47,7 +47,7 @@ echo "Env Loaded"
 echo "hostname; sleep \$(( SLURM_PROCID * 10 )); nvidia-smi;
 case $SLURM_JOB_PARTITION in
 a40)
-tokens=7000
+tokens=700
 ;;
 rtx6000)
 tokens=3000
@@ -71,7 +71,7 @@ train.py \
 --cuda True \
 --exp_name unsupMT_agab \
 --dump_path /checkpoint/\${USER}/\${SLURM_JOB_ID} \
---data_path /h/benjami/AntiXLM/data/ \
+--data_path /h/benjami/scrach/AntiXLM/data/ \
 --lgs 'ab-ag' \
 --ae_steps 'ab,ag' \
 --bt_steps 'ab-ag-ab,ag-ab-ag' \
@@ -79,14 +79,13 @@ train.py \
 --mt_steps_ratio 25 \
 --mt_steps_warmup 0 \
 --word_shuffle 3 \
---word_dropout 0.1 \
---word_blank 0.1 \
+--word_dropout 0.15 \
+--word_blank 0.15 \
 --lambda_ae '0:1,100000:0.1,300000:0' \
 --max_len 160,250 \
 --encoder_only false \
 --emb_dim 1024 \
---n_enc_layers 4 \
---n_dec_layers 6 \
+--n_layers 8 \
 --n_heads 8 \
 --dropout 0.1 \
 --accumulate_gradients 1 \
@@ -95,13 +94,13 @@ train.py \
 --tokens_per_batch \$tokens \
 --batch_size 512 \
 --optimizer adam_inverse_sqrt,beta1=0.9,beta2=0.98,lr=0.001 \
---epoch_size 125000 \
+--epoch_size 100000 \
 --save_periodic 60000 \
---eval_bleu true \
 --beam_size 10 \
 --stopping_criterion 'valid_ag-ab_mt_bleu,10' \
 --validation_metrics 'valid_ag-ab_mt_bleu' \
---master_port 12340" > srun_worker.sh
+--master_port 12340
+--debug_train True" > srun_worker.sh
 
-srun --mem=100GB --cpus-per-task=12 bash srun_worker.sh 
+srun --mem=140GB --cpus-per-task=8 bash srun_worker.sh 
 wait

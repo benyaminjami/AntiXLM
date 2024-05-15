@@ -75,9 +75,16 @@ def get_parser():
                         help="Share input and output embeddings")
     parser.add_argument("--sinusoidal_embeddings", type=bool_flag, default=False,
                         help="Use sinusoidal embeddings")
-    parser.add_argument("--lang_emb", type=str, default="layer", choices=["emb", "layer"],
+    parser.add_argument("--lang_emb", type=str, default="emb", choices=["emb", "layer"],
                         help="how to distinguish langs")
-    parser.add_argument("--fused_bert", type=bool_flag, default=True,
+    parser.add_argument("--sampling_method", type=str, default="B", choices=["B", "T", 'G'],
+                        help="""
+                            - G: Greedy
+                            - B: Beam sampling -> sampling_param: Beam size, ex: 5/10/20
+                            - T: Tempreture sampling -> sampling_param: tempreture ex: 0.5/1/2
+                        """)
+    parser.add_argument("--sampling_param", type=int, default="5")
+    parser.add_argument("--fused_bert", type=bool_flag, default=False,
                         help="INCORPORATING BERT INTO NEURAL MACHINE TRANSLATION")
 
     # memory parameters
@@ -148,7 +155,7 @@ def get_parser():
                         help="Split data across workers of a same node")
     parser.add_argument("--optimizer", type=str, default="adam,lr=0.0001",
                         help="Optimizer (SGD / RMSprop / Adam, etc.)")
-    parser.add_argument("--clip_grad_norm", type=float, default=5,
+    parser.add_argument("--clip_grad_norm", type=float, default=4,
                         help="Clip gradients norm (0 to disable)")
     parser.add_argument("--epoch_size", type=int, default=100000,
                         help="Epoch size / evaluation frequency (-1 for parallel data size)")
@@ -210,7 +217,7 @@ def get_parser():
                         help="Early stopping, stop as soon as we have `beam_size` hypotheses, although longer ones may have better scores.")
 
     # evaluation
-    parser.add_argument("--eval_bleu", type=bool_flag, default=False,
+    parser.add_argument("--eval", type=bool_flag, default=False,
                         help="Evaluate BLEU score during MT training")
     parser.add_argument("--open", type=bool_flag, default=True,
                         help="Generate CDR with unspecified length")                        
@@ -263,6 +270,7 @@ def main(params):
         evaluator = EncDecEvaluator(trainer, data, params, trainer.bert)
     logger.info("Models Created")
 
+    
     # evaluation
     if params.eval_only:
         scores = evaluator.run_all_evals(trainer)
@@ -344,11 +352,11 @@ if __name__ == '__main__':
     params = parser.parse_args()
 
     # # debug mode
-    # if params.debug:
-    #     params.exp_name = 'debug'
-    #     params.exp_id = 'debug_%08i' % random.randint(0, 100000000)
-    #     params.debug_slurm = True
-    #     params.debug_train = True
+    if params.debug:
+        params.exp_name = 'debug'
+        params.exp_id = 'debug_%08i' % random.randint(0, 100000000)
+        params.debug_slurm = True
+        params.debug_train = True
 
     # check parameters
     check_data_params(params)

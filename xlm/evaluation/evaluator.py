@@ -17,6 +17,7 @@ import torch
 import xlm.utils as utils
 from ..model.transformer import get_masks
 from ..utils import to_cuda, restore_segmentation, concat_batches
+from Bio import pairwise2
 # from ..model.memory import HashingMemory
 
 
@@ -209,12 +210,12 @@ class Evaluator(object):
         data_set_dictionary = {
             "ab-ag.test":0,
             "ag-ab.test":1,
-            "ag-ab.test-cdr":2, 
-            "ag-ab.test-cdr_open":3,
-            "ab-ag.valid":4,
-            "ag-ab.valid":5,
-            "ag-ab.valid-cdr":6, 
-            "ag-ab.valid-cdr_open":7 
+            # "ag-ab.test-cdr":, 
+            # "ag-ab.test-cdr_open":3,
+            "ab-ag.valid":2,
+            "ag-ab.valid":3,
+            # "ag-ab.valid-cdr":6, 
+            # "ag-ab.valid-cdr_open":7 
         }
 
         os.makedirs(os.path.join(params.hyp_path, str(scores['epoch'])), exist_ok=True)
@@ -228,22 +229,22 @@ class Evaluator(object):
 
                 # machine translation task (evaluate perplexity and accuracy)
                 for lang1, lang2 in (('ag', 'ab'), ('ab', 'ag')):                    
-                    generate = params.eval_bleu and \
+                    generate = params.eval and \
                         data_set_dictionary["{0}-{1}.{2}".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
                     if generate:
                         self.evaluate_mt(scores, data_set, lang1, lang2, generate)
 
-                lang1, lang2 = 'ag', 'ab'              
-                generate = params.eval_bleu and \
-                    data_set_dictionary["{0}-{1}.{2}-cdr".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
-                if generate:
-                    self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True)
+                # lang1, lang2 = 'ag', 'ab'              
+                # generate = params.eval and \
+                #     data_set_dictionary["{0}-{1}.{2}-cdr".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
+                # if generate:
+                #     self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True)
                 
                 
-                generate = params.eval_bleu and params.open and \
-                    data_set_dictionary["{0}-{1}.{2}-cdr_open".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
-                if generate:
-                    self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True, unrestricted=True)
+                # generate = params.eval and params.open and \
+                #     data_set_dictionary["{0}-{1}.{2}-cdr_open".format(lang1, lang2, data_set)] % (params.world_size) == params.global_rank 
+                # if generate:
+                #     self.evaluate_mt(scores, data_set, lang1, lang2, generate, cdr=True, unrestricted=True)
                     
         logger.info("============ End evaluating epoch %i ... ============" % trainer.epoch)
         return scores
@@ -278,7 +279,7 @@ class EncDecEvaluator(Evaluator):
         self.aligner.extend_gap_score = -0.5
 
 
-    def evaluate_mt(self, scores, data_set, lang1, lang2, generate, cdr=False, unrestricted=False):
+    def evaluate_mt(self, scores, data_set, lang1, lang2, generate, cdr=False):
         """
         Evaluate perplexity and next word prediction accuracy.
         """
@@ -306,9 +307,9 @@ class EncDecEvaluator(Evaluator):
 
         # store hypothesis to compute BLEU score
 
-        if generate:
-            hypothesis = []
-            forward_result = []
+
+        hypothesis = []
+        forward_result = []
   
         for batch in self.get_iterator(data_set, lang1, params.id2lang[int(not lang1_id)]):
             # generate batch
@@ -343,7 +344,8 @@ class EncDecEvaluator(Evaluator):
                 enc1 = enc1.transpose(0, 1)
 
                 # decode target sentence
-                if not cdr:
+                #TODO
+                if generate:
                     dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1, bert_embed=bert_embed)
 
                     # loss
@@ -362,11 +364,19 @@ class EncDecEvaluator(Evaluator):
                     
                     forward_result.extend(forward_text)
 
-                    batch_forward_identity, batch_forward_cdr_identity = calculate_identity(self.aligner, ref, forward_text, lang2, w2)
+                    batch_forward_identity, batch_forward_cdr_identity = sequence_identity(ref, forward_text, w2.transpose(0,1).tolist())
                     forward_identity += batch_forward_identity
                     forward_cdr_identity += batch_forward_cdr_identity
+                    
+                    report_metric(metric_name='mt_ppl', step=scores['epoch'], value=np.exp(xe_loss / n_words), args=(data_set, lang1, lang2), scores=scores)
 
-                
+                    report_metric(metric_name='mt_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1, lang2), scores=scores)
+
+                    report_metric(metric_name='mt_frw_identity', step=scores['epoch'], value=float(100. * forward_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+
+                    report_metric(metric_name='mt_frw_cdr_identity', step=scores['epoch'], value=float(100. * forward_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+
+                 
                 if generate:
                     if params.beam_size == 1:
                         generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=self.params.max_len[lang2], bert_embed=bert_embed)
@@ -380,51 +390,47 @@ class EncDecEvaluator(Evaluator):
                             bert_embed=bert_embed,
                             cdr_generation=cdr,
                             tgt_frw=x2,
-                            w=w2,
-                            open_end=unrestricted
+                            w=w2, 
                         )
                         
                     hypothesis_text = convert_to_text(generated, lengths, self.dico, params)
                     hypothesis.extend(hypothesis_text)
-                    batch_generate_identity, batch_generate_cdr_identity = calculate_identity(self.aligner, ref, hypothesis_text, lang2, w2, beam_size=params.beam_size)
+                    batch_generate_identity, batch_generate_cdr_identity = sequence_identity(ref, hypothesis_text, w2.transpose(0,1).tolist())
                     generate_identity += batch_generate_identity
                     generate_cdr_identity += batch_generate_cdr_identity
 
-        s = ''
-        if unrestricted:
-            s+='_unrestricted'
-        if cdr:
-            s+='_fixedFW'
-        s += '_identity'
-        if unrestricted or cdr:
-            report_metric(metric_name='mt_gen_cdr' + s, step=scores['epoch'], value=float(100. * generate_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
-            
-        elif lang1 != lang2:
-            report_metric(metric_name='mt_ppl', step=scores['epoch'], value=np.exp(xe_loss / n_words), args=(data_set, lang1, lang2), scores=scores)
+                    report_metric(metric_name='mt_gen_identity', step=scores['epoch'], value=float(100. * generate_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
 
-            report_metric(metric_name='mt_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1, lang2), scores=scores)
-
-            if generate:    
-                report_metric(metric_name='mt_frw_identity', step=scores['epoch'], value=float(100. * forward_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
- 
-                report_metric(metric_name='mt_gen_identity', step=scores['epoch'], value=float(100. * generate_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
-                
-                if lang2 == 'ab':
-                    report_metric(metric_name='mt_frw_cdr_identity', step=scores['epoch'], value=float(100. * forward_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
-                    
                     report_metric(metric_name='mt_gen_cdr_identity', step=scores['epoch'], value=float(100. * generate_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+
+
+
+        s = ''
+        if cdr:
+            s+='fixedFW_'
+            
+        # if lang1 != lang2:
+
+
+        #     if generate:    
+        #         report_metric(metric_name='mt_frw_identity', step=scores['epoch'], value=float(100. * forward_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+ 
+        #         report_metric(metric_name='mt_gen_identity', step=scores['epoch'], value=float(100. * generate_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+                
+        #         if lang2 == 'ab':
+        #             report_metric(metric_name='mt_frw_cdr_identity', step=scores['epoch'], value=float(100. * forward_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
+                    
+        #             report_metric(metric_name='mt_gen_cdr_identity', step=scores['epoch'], value=float(100. * generate_cdr_identity / n_sentences), args=(data_set, lang1, lang2), scores=scores)
                     
 
-        else:
-            report_metric(metric_name='ae_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1), scores=scores)
+        # else:
+        #     report_metric(metric_name='ae_acc', step=scores['epoch'], value=float(100. * n_valid / n_words), args=(data_set, lang1), scores=scores)
             
         if lang1 != lang2:
             hyp_dir = os.path.join(params.hyp_path, str(scores['epoch']))
-            # compute BLEU
             frw_name = 'frw{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
             frw_path = os.path.join(hyp_dir, frw_name)
 
-            # export sentences to hypothesis file / restore BPE segmentation
             with open(frw_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(forward_result) + '\n')
             restore_segmentation(frw_path)
@@ -432,10 +438,54 @@ class EncDecEvaluator(Evaluator):
             hyp_name = 'hyp{0}.{1}-{2}.{3}.{4}.txt'.format(scores['epoch'], lang1, lang2, data_set, s)
             hyp_path = os.path.join(hyp_dir, hyp_name)
 
-            # export sentences to hypothesis file / restore BPE segmentation
             with open(hyp_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(hypothesis) + '\n')
             restore_segmentation(hyp_path)
+
+
+from Bio import pairwise2
+import numpy as np
+
+
+def sequence_identity(references, strings, masks):
+    if len(references) != len(strings):
+        raise ValueError("The number of reference sequences and strings must be equal.")
+
+    def cal_identity(alignment, mask):
+        seq1, seq2 = alignment[0], alignment[1]
+        matches = np.array([a == b for a, b in zip(seq1, seq2)])
+        if mask is not None:
+            n_matches = 0
+            j = 0
+            for i, a in enumerate(seq1):
+                if seq1[i] == seq2[i] and mask[j] == 1:
+                    n_matches += 1
+                if a != '-':
+                    j+=1    
+            return (n_matches / sum(mask))
+            
+        else:
+            return matches.sum()/len(seq1)
+
+
+    blosum62 = substitution_matrices.load("BLOSUM62")
+    total_identity = 0
+    total_region_identity = 0
+        
+    for reference, string, mask in zip(references, strings, masks):
+        if string == '':
+            continue
+        alignment = pairwise2.align.globalds(reference.replace(' ',''), string.replace(' ',''), blosum62, -10, -0.5)[0]
+        identity = cal_identity(alignment, None)
+        total_identity += identity
+
+        region_identity = cal_identity(alignment, mask)
+        total_region_identity += region_identity
+        
+    average_identity = total_identity / len(strings)
+    average_region_identity = total_region_identity / len(strings)
+    return average_identity, average_region_identity
+
 
 def calculate_identity(aligner, ref, gen_result, lang2, w2, beam_size=1):
     gen_identity, gen_cdr_identity = 0, 0
@@ -448,7 +498,9 @@ def calculate_identity(aligner, ref, gen_result, lang2, w2, beam_size=1):
             ref_sent = ref[-i].replace(" ", "")
             if len(gen_sent) == 0:
                 continue
-            gen_alignment = aligner.align(ref_sent, gen_sent)[0]
+            # TODO
+            gen_alignment = pairwise2.align.globaldx(ref_sent, gen_sent, substitution_matrices.load("BLOSUM62"))[0]
+            # gen_alignment = [ref_sent, gen_sent]
 
             gen_matches = 0
             gen_index = 0
@@ -465,7 +517,7 @@ def calculate_identity(aligner, ref, gen_result, lang2, w2, beam_size=1):
 
             gen_matches /= len(ref_sent)
 
-            gen_cdr_matches /= w2[:, -i].sum() - 1
+            gen_cdr_matches /= w2[:, -i].sum()
 
             beam_identity += gen_matches
             beam_cdr_identity += gen_cdr_matches

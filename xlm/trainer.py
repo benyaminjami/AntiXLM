@@ -57,6 +57,11 @@ class Trainer(object):
             self.encoder = nn.parallel.DistributedDataParallel(self.encoder, device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True)
             self.decoder = nn.parallel.DistributedDataParallel(self.decoder, device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True)
 
+        #TODO
+        # logger.info("Compiling the Model ...")
+        # self.encoder = torch.compile(self.encoder)
+        # self.decoder = torch.compile(self.decoder)
+
         # set optimizers
         self.set_optimizers()
 
@@ -232,9 +237,9 @@ class Trainer(object):
         update_lambdas(self.params, self.n_total_iter)
         self.print_stats()
 
-    def get_sampling_tempreture(self, step, init_temp=2, decay_steps=1500, steepness=10):
-        sigmoid = 1 / (1 + np.exp(steepness * (step / decay_steps - 0.5)))
-        return init_temp * sigmoid
+    def get_sampling_tempreture(self, step, init_temp=1, decay_steps=2000, steepness=5):
+        sigmoid = 1 / (1 + np.exp(steepness * ((step - 3000) / decay_steps - 0.1)))
+        return init_temp * sigmoid + 1e-3
 
 
     def print_stats(self):
@@ -559,20 +564,23 @@ class Trainer(object):
         for name in self.MODEL_NAMES:
             getattr(self, name).load_state_dict(data[name])
 
-        # reload optimizers
-        for name in self.optimizers.keys():
-            if False:  # AMP checkpoint reloading is buggy, we cannot do that - TODO: fix - https://github.com/NVIDIA/apex/issues/250
-                logger.warning(f"Reloading checkpoint optimizer {name} ...")
-                self.optimizers[name].load_state_dict(data[f'{name}_optimizer'])
-            else:  # instead, we only reload current iterations / learning rates
-                logger.warning(f"Not reloading checkpoint optimizer {name}.")
-                for group_id, param_group in enumerate(self.optimizers[name].param_groups):
-                    if 'num_updates' not in param_group:
-                        logger.warning(f"No 'num_updates' for optimizer {name}.")
-                        continue
-                    logger.warning(f"Reloading 'num_updates' and 'lr' for optimizer {name}.")
-                    param_group['num_updates'] = data[f'{name}_optimizer']['param_groups'][group_id]['num_updates']
-                    param_group['lr'] = self.optimizers[name].get_lr_for_step(param_group['num_updates'])
+        name = 'model'
+        logger.warning(f"Reloading checkpoint optimizer {name} ...")
+        self.optimizers[name].load_state_dict(data[f'{name}_optimizer'])
+        # # reload optimizers
+        # for name in self.optimizers.keys():
+        #      if False:  # AMP checkpoint reloading is buggy, we cannot do that - TODO: fix - https://github.com/NVIDIA/apex/issues/250
+        #          logger.warning(f"Reloading checkpoint optimizer {name} ...")
+        #          self.optimizers[name].load_state_dict(data[f'{name}_optimizer'])
+        #      else:  # instead, we only reload current iterations / learning rates
+        #          logger.warning(f"Not reloading checkpoint optimizer {name}.")
+        #          for group_id, param_group in enumerate(self.optimizers[name].param_groups):
+        #              if 'num_updates' not in param_group:
+        #                  logger.warning(f"No 'num_updates' for optimizer {name}.")
+        #                  continue
+        #              logger.warning(f"Reloading 'num_updates' and 'lr' for optimizer {name}.")
+        #              param_group['num_updates'] = data[f'{name}_optimizer']['param_groups'][group_id]['num_updates']
+        #              param_group['lr'] = self.optimizers[name].get_lr_for_step(param_group['num_updates'])
 
         # reload main metrics
         self.epoch = data['epoch'] + 1
@@ -948,8 +956,8 @@ class EncDecTrainer(Trainer):
                 # encode source sentence and translate it
                 enc1 = _encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False, bert_embed=bert_embed)
                 enc1 = enc1.transpose(0, 1)
-                
-                x2, len2 = _decoder.generate(enc1, len1, lang2_id, max_len=params.max_len[lang2], bert_embed=bert_embed, sample_temperature=self.get_sampling_tempreture(step=self.n_total_iter))
+                # sample_temperature = self.get_sampling_tempreture(step=self.n_total_iter)
+                x2, len2 = _decoder.generate(enc1, len1, lang2_id, sampling_method=params.sampling_method, sampling_param=params.sampling_param, max_len=params.max_len[lang2], bert_embed=bert_embed)
                 langs2 = x2.clone().fill_(lang2_id)
 
                 bert_embed = None
